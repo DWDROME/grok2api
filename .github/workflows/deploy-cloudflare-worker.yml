@@ -1,0 +1,54 @@
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "cloudflare/worker/**"
+      - ".github/workflows/deploy-cloudflare-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloudflare-worker
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate required secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          UPSTREAM_BASE_URL: ${{ secrets.UPSTREAM_BASE_URL }}
+          WORKER_API_KEYS: ${{ secrets.WORKER_API_KEYS }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || (echo "Missing secret: CLOUDFLARE_API_TOKEN" && exit 1)
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || (echo "Missing secret: CLOUDFLARE_ACCOUNT_ID" && exit 1)
+          test -n "$UPSTREAM_BASE_URL" || (echo "Missing secret: UPSTREAM_BASE_URL" && exit 1)
+          test -n "$WORKER_API_KEYS" || (echo "Missing secret: WORKER_API_KEYS" && exit 1)
+
+      - name: Deploy Worker
+        working-directory: cloudflare/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          UPSTREAM_BASE_URL: ${{ secrets.UPSTREAM_BASE_URL }}
+          WORKER_API_KEYS: ${{ secrets.WORKER_API_KEYS }}
+        run: |
+          npx wrangler deploy \
+            --config wrangler.toml \
+            --var "UPSTREAM_BASE_URL=$UPSTREAM_BASE_URL" \
+            --var "API_KEYS=$WORKER_API_KEYS"

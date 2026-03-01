@@ -1,0 +1,11 @@
+name = "grok2api-edge-proxy"
+main = "src/index.js"
+compatibility_date = "2025-02-20"
+workers_dev = true
+
+routes = [
+  { pattern = "grokapi.ds-everything-ocean.xyz/*", zone_name = "ds-everything-ocean.xyz" }
+]
+
+[observability.logs]
+enabled = true

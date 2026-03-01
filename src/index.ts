@@ -99,11 +99,11 @@ app.get("/_worker.js", (c) => c.notFound());
 app.get("/", (c) => c.redirect("/login", 302));
 
 app.get("/login", (c) => {
-  return fetchAsset(c, "/admin/pages/login.html");
+  return fetchAsset(c, "/admin/pages/login");
 });
 
 app.get("/admin/login", (c) => {
-  return fetchAsset(c, "/admin/pages/login.html");
+  return fetchAsset(c, "/admin/pages/login");
 });
 
 // Legacy (old admin UI): keep /manage as an alias.
@@ -114,7 +114,7 @@ app.get("/manage", (c) => {
 app.get("/admin", (c) => c.redirect("/login", 302));
 
 app.get("/admin/token", (c) => {
-  return fetchAsset(c, "/admin/pages/token.html");
+  return fetchAsset(c, "/admin/pages/token");
 });
 
 app.get("/admin/datacenter", (c) => {
@@ -122,11 +122,11 @@ app.get("/admin/datacenter", (c) => {
 });
 
 app.get("/admin/config", (c) => {
-  return fetchAsset(c, "/admin/pages/config.html");
+  return fetchAsset(c, "/admin/pages/config");
 });
 
 app.get("/admin/cache", (c) => {
-  return fetchAsset(c, "/admin/pages/cache.html");
+  return fetchAsset(c, "/admin/pages/cache");
 });
 
 app.get("/admin/keys", (c) => {
@@ -134,11 +134,11 @@ app.get("/admin/keys", (c) => {
 });
 
 app.get("/chat", (c) => {
-  return fetchAsset(c, "/public/pages/chat.html");
+  return fetchAsset(c, "/public/pages/chat");
 });
 
 app.get("/admin/chat", (c) => {
-  return fetchAsset(c, "/public/pages/chat.html");
+  return fetchAsset(c, "/public/pages/chat");
 });
 
 app.get("/static/*", (c) => {

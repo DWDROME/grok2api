@@ -7,5 +7,11 @@ routes = [
   { pattern = "grokapi.ds-everything-ocean.xyz/*", zone_name = "ds-everything-ocean.xyz" }
 ]
 
+[[d1_databases]]
+binding = "DB"
+database_name = "grok2api-edge-proxy"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
 [observability.logs]
 enabled = true

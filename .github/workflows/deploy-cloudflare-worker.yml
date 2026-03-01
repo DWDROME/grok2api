@@ -40,6 +40,87 @@ jobs:
           test -n "$UPSTREAM_BASE_URL" || (echo "Missing secret: UPSTREAM_BASE_URL" && exit 1)
           test -n "$WORKER_API_KEYS" || (echo "Missing secret: WORKER_API_KEYS" && exit 1)
 
+      - name: Ensure D1 and generate wrangler.ci.toml
+        working-directory: cloudflare/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          python3 -u - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.request
+
+          token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+          account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+          if not token or not account_id:
+              raise SystemExit("Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID")
+
+          text = open("wrangler.toml", "r", encoding="utf-8").read()
+          worker_name_match = re.search(r'(?m)^name\\s*=\\s*"([^"]+)"\\s*$', text)
+          if not worker_name_match:
+              raise SystemExit("Cannot find worker name in wrangler.toml")
+          worker_name = worker_name_match.group(1).strip()
+
+          d1_name_match = re.search(r'(?m)^database_name\\s*=\\s*"([^"]+)"\\s*$', text)
+          d1_name = d1_name_match.group(1).strip() if d1_name_match else worker_name
+
+          base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database"
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+          }
+
+          def request(method: str, url: str, body=None):
+              req = urllib.request.Request(
+                  url=url,
+                  data=None if body is None else json.dumps(body).encode("utf-8"),
+                  headers=headers,
+                  method=method,
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read().decode("utf-8"))
+
+          d1_id = None
+          page = 1
+          while True:
+              res = request("GET", f"{base}?per_page=100&page={page}")
+              if not res.get("success"):
+                  raise RuntimeError(res)
+              for item in res.get("result", []):
+                  if item.get("name") == d1_name:
+                      d1_id = item.get("uuid") or item.get("id")
+                      break
+              if d1_id:
+                  break
+              total_pages = int((res.get("result_info") or {}).get("total_pages") or 1)
+              if page >= total_pages:
+                  break
+              page += 1
+
+          if not d1_id:
+              created = request("POST", base, {"name": d1_name})
+              if not created.get("success"):
+                  raise RuntimeError(created)
+              d1_id = (created.get("result") or {}).get("uuid") or (created.get("result") or {}).get("id")
+              if not d1_id:
+                  raise SystemExit("D1 creation succeeded but missing database id")
+
+          ci_text = text.replace("REPLACE_WITH_D1_DATABASE_ID", d1_id)
+          open("wrangler.ci.toml", "w", encoding="utf-8").write(ci_text)
+          print(f"D1 ready: {d1_name} ({d1_id})")
+          print("Generated: wrangler.ci.toml")
+          PY
+
+      - name: Apply D1 migrations
+        working-directory: cloudflare/worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler d1 migrations apply DB --remote --config wrangler.ci.toml
+
       - name: Deploy Worker
         working-directory: cloudflare/worker
         env:
@@ -54,7 +135,7 @@ jobs:
             EXTRA_VAR_ARGS="$EXTRA_VAR_ARGS --var UPSTREAM_AUTH_BEARER:$UPSTREAM_AUTH_BEARER"
           fi
           npx wrangler deploy \
-            --config wrangler.toml \
+            --config wrangler.ci.toml \
             --var "UPSTREAM_BASE_URL:$UPSTREAM_BASE_URL" \
             --var "API_KEYS:$WORKER_API_KEYS" \
             $EXTRA_VAR_ARGS

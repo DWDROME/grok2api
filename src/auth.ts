@@ -11,10 +11,21 @@ export interface ApiAuthInfo {
   is_admin: boolean;
 }
 
-function bearerToken(authHeader: string | null): string | null {
-  if (!authHeader) return null;
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  return m?.[1]?.trim() || null;
+function extractAuthToken(authHeader: string | null, xApiKeyHeader: string | null): string | null {
+  const xApiKey = String(xApiKeyHeader ?? "").trim();
+  if (xApiKey) return xApiKey;
+
+  const raw = String(authHeader ?? "").trim();
+  if (!raw) return null;
+
+  const bearer = raw.match(/^Bearer\s+(.+)$/i);
+  if (bearer?.[1]?.trim()) return bearer[1].trim();
+
+  // 支持 Authorization 直接传 token（不带 Bearer 前缀）
+  // 仅接受“无空格”的单段 token，避免误接收 Basic 等其它方案
+  if (/^Basic\s+/i.test(raw)) return null;
+  if (raw.includes(" ")) return null;
+  return raw;
 }
 
 function authError(message: string, code: string): Record<string, unknown> {
@@ -31,7 +42,7 @@ export const requireApiAuth: MiddlewareHandler<{ Bindings: Env; Variables: { api
   c,
   next,
 ) => {
-  const token = bearerToken(c.req.header("Authorization") ?? null);
+  const token = extractAuthToken(c.req.header("Authorization") ?? null, c.req.header("X-API-Key") ?? null);
   const settings = await getSettings(c.env);
 
   if (!token) {
@@ -65,10 +76,9 @@ export const requireApiAuth: MiddlewareHandler<{ Bindings: Env; Variables: { api
 };
 
 export const requireAdminAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
-  const token = bearerToken(c.req.header("Authorization") ?? null);
+  const token = extractAuthToken(c.req.header("Authorization") ?? null, c.req.header("X-API-Key") ?? null);
   if (!token) return c.json({ error: "缺少会话", code: "MISSING_SESSION" }, 401);
   const ok = await verifyAdminSession(c.env.DB, token);
   if (!ok) return c.json({ error: "会话已过期", code: "SESSION_EXPIRED" }, 401);
   return next();
 };
-

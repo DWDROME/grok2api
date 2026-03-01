@@ -58,12 +58,12 @@ jobs:
               raise SystemExit("Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID")
 
           text = open("wrangler.toml", "r", encoding="utf-8").read()
-          worker_name_match = re.search(r'(?m)^name\\s*=\\s*"([^"]+)"\\s*$', text)
+          worker_name_match = re.search(r'(?m)^name\s*=\s*"([^"]+)"\s*$', text)
           if not worker_name_match:
               raise SystemExit("Cannot find worker name in wrangler.toml")
           worker_name = worker_name_match.group(1).strip()
 
-          d1_name_match = re.search(r'(?m)^database_name\\s*=\\s*"([^"]+)"\\s*$', text)
+          d1_name_match = re.search(r'(?m)^database_name\s*=\s*"([^"]+)"\s*$', text)
           d1_name = d1_name_match.group(1).strip() if d1_name_match else worker_name
 
           base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database"

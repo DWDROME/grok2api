@@ -171,19 +171,22 @@ app.get("/static/*", (c) => {
   return fetchAsset(c, url.pathname);
 });
 
-app.get("/health", (c) =>
-  c.json({
+function healthPayload(env: Env) {
+  return {
     status: "healthy",
     service: "Grok2API",
     runtime: "cloudflare-workers",
-    build: { sha: getBuildSha(c.env as Env) },
+    build: { sha: getBuildSha(env) },
     bindings: {
-      db: Boolean((c.env as any)?.DB),
-      kv_cache: Boolean((c.env as any)?.KV_CACHE),
-      assets: Boolean(getAssets(c.env as any)),
+      db: Boolean((env as any)?.DB),
+      kv_cache: Boolean((env as any)?.KV_CACHE),
+      assets: Boolean(getAssets(env as any)),
     },
-  }),
-);
+  };
+}
+
+app.get("/health", (c) => c.json(healthPayload(c.env as Env)));
+app.get("/__health", (c) => c.json(healthPayload(c.env as Env)));
 
 app.notFound(async (c) => {
   const assets = getAssets(c.env as any);

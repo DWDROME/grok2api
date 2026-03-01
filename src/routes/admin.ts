@@ -59,6 +59,15 @@ function parseBearer(auth: string | null): string | null {
   return m?.[1]?.trim() || null;
 }
 
+function parseAuthToken(auth: string | null): string | null {
+  if (!auth) return null;
+  const bearer = parseBearer(auth);
+  if (bearer) return bearer;
+  const raw = String(auth).trim();
+  if (!raw || /\s/.test(raw)) return null;
+  return raw;
+}
+
 function validateTokenType(token_type: string): "sso" | "ssoSuper" {
   if (token_type !== "sso" && token_type !== "ssoSuper") throw new Error("无效的Token类型");
   return token_type;
@@ -166,6 +175,13 @@ async function verifyWsApiKeyForImagine(c: any): Promise<boolean> {
 
 export const adminRoutes = new Hono<{ Bindings: Env }>();
 
+// 兼容旧前端路径：/v1/admin/* -> /api/v1/admin/*
+adminRoutes.all("/v1/admin/*", (c) => {
+  const url = new URL(c.req.url);
+  const suffix = url.pathname.slice("/v1/admin".length);
+  return c.redirect(`/api/v1/admin${suffix}${url.search}`, 307);
+});
+
 // ============================================================================
 // Legacy-compatible Admin API (/api/v1/admin/*)
 // Used by the newer multi-page admin UI in app/static.
@@ -234,6 +250,20 @@ adminRoutes.post("/api/v1/admin/login", async (c) => {
     return c.json(legacyOk({ api_key: token }));
   } catch (e) {
     return c.json(legacyErr(`Login error: ${e instanceof Error ? e.message : String(e)}`), 500);
+  }
+});
+
+adminRoutes.get("/api/v1/admin/verify", async (c) => {
+  try {
+    const settings = await getSettings(c.env);
+    const token = parseAuthToken(c.req.header("Authorization") ?? null);
+    const appKey = String(settings.global.admin_password ?? "").trim();
+    if (!token || !appKey || token !== appKey) {
+      return c.json(legacyErr("Invalid app_key"), 401);
+    }
+    return c.json(legacyOk({ ok: true }));
+  } catch (e) {
+    return c.json(legacyErr(`Verify error: ${e instanceof Error ? e.message : String(e)}`), 500);
   }
 });
 

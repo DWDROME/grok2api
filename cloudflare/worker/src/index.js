@@ -61,6 +61,9 @@ export default {
 
     const headers = new Headers(request.headers);
     headers.delete("host");
+    if ((env.UPSTREAM_AUTH_BEARER || "").trim()) {
+      headers.set("authorization", `Bearer ${env.UPSTREAM_AUTH_BEARER.trim()}`);
+    }
 
     const init = {
       method: request.method,

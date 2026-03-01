@@ -47,8 +47,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           UPSTREAM_BASE_URL: ${{ secrets.UPSTREAM_BASE_URL }}
           WORKER_API_KEYS: ${{ secrets.WORKER_API_KEYS }}
+          UPSTREAM_AUTH_BEARER: ${{ secrets.UPSTREAM_AUTH_BEARER }}
         run: |
+          EXTRA_VAR_ARGS=""
+          if [ -n "$UPSTREAM_AUTH_BEARER" ]; then
+            EXTRA_VAR_ARGS="$EXTRA_VAR_ARGS --var UPSTREAM_AUTH_BEARER=$UPSTREAM_AUTH_BEARER"
+          fi
           npx wrangler deploy \
             --config wrangler.toml \
             --var "UPSTREAM_BASE_URL=$UPSTREAM_BASE_URL" \
-            --var "API_KEYS=$WORKER_API_KEYS"
+            --var "API_KEYS=$WORKER_API_KEYS" \
+            $EXTRA_VAR_ARGS

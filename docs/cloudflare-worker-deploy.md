@@ -10,6 +10,7 @@
 - `CLOUDFLARE_ACCOUNT_ID`：Cloudflare Account ID
 - `UPSTREAM_BASE_URL`：上游 API 地址（例如 `http://你的服务器域名`）
 - `WORKER_API_KEYS`：对外鉴权 key，支持多个，逗号分隔
+- `UPSTREAM_AUTH_BEARER`（可选）：若填写，Worker 转发时会强制使用该上游令牌
 
 ## 2. 自动部署触发
 

@@ -99,75 +99,45 @@ app.get("/_worker.js", (c) => c.notFound());
 app.get("/", (c) => c.redirect("/login", 302));
 
 app.get("/login", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/login?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/admin/pages/login.html");
 });
 
 app.get("/admin/login", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/login?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/admin/pages/login.html");
 });
 
 // Legacy (old admin UI): keep /manage as an alias.
 app.get("/manage", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/token?v=${encodeURIComponent(buildSha)}`, 302);
-  return c.redirect(`/admin/token?v=${encodeURIComponent(buildSha)}`, 302);
+  return c.redirect("/admin/token", 302);
 });
 
 app.get("/admin", (c) => c.redirect("/login", 302));
 
 app.get("/admin/token", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/token?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/admin/pages/token.html");
 });
 
 app.get("/admin/datacenter", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/datacenter?v=${encodeURIComponent(buildSha)}`, 302);
-  return c.redirect(`/admin/token?v=${encodeURIComponent(buildSha)}`, 302);
+  return c.redirect("/admin/token", 302);
 });
 
 app.get("/admin/config", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/config?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/admin/pages/config.html");
 });
 
 app.get("/admin/cache", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/cache?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/admin/pages/cache.html");
 });
 
 app.get("/admin/keys", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/keys?v=${encodeURIComponent(buildSha)}`, 302);
-  return c.redirect(`/admin/token?v=${encodeURIComponent(buildSha)}`, 302);
+  return c.redirect("/admin/token", 302);
 });
 
 app.get("/chat", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/chat?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/public/pages/chat.html");
 });
 
 app.get("/admin/chat", (c) => {
-  const buildSha = getBuildSha(c.env as Env);
-  const v = c.req.query("v") ?? "";
-  if (v !== buildSha) return c.redirect(`/admin/chat?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/public/pages/chat.html");
 });
 

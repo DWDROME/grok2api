@@ -39,10 +39,15 @@ jobs:
             conflict_files="$(git diff --name-only --diff-filter=U || true)"
             for f in ${conflict_files}; do
               case "$f" in
-                .github/workflows/deploy-cloudflare-worker.yml|\
+                .github/workflows/cloudflare-workers.yml|\
                 .github/workflows/sync-upstream.yml|\
-                cloudflare/worker/*|\
-                docs/cloudflare-worker-deploy.md)
+                wrangler.toml|\
+                package.json|\
+                package-lock.json|\
+                tsconfig.json|\
+                README.cloudflare.md|\
+                src/*|\
+                migrations/*)
                   git checkout --ours -- "$f"
                   ;;
                 *)

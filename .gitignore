@@ -55,3 +55,8 @@ htmlcov/
 
 # Project specific
 config.local.toml
+
+# Cloudflare/Node
+node_modules/
+wrangler.ci.toml
+.wrangler/

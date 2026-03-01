@@ -63,6 +63,7 @@ jobs:
           import json
           import os
           import re
+          import urllib.parse
           import urllib.request
 
           token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
@@ -89,6 +90,13 @@ jobs:
               req = urllib.request.Request(url, data=body, headers=headers, method=method)
               with urllib.request.urlopen(req) as resp:
                   return json.loads(resp.read().decode("utf-8"))
+
+          def extract_routes(text: str):
+              routes = []
+              # 兼容 inline routes = [{ pattern = "...", zone_name = "..." }, ...]
+              for m in re.finditer(r'pattern\s*=\s*"([^"]+)"\s*,\s*zone_name\s*=\s*"([^"]+)"', text):
+                  routes.append((m.group(1).strip(), m.group(2).strip()))
+              return routes
 
           kv_id = None
           page = 1
@@ -157,6 +165,56 @@ jobs:
               else:
                   text2 = re.sub(r'(?m)^\[vars\]\s*$', f'[vars]\nBUILD_SHA = "{build_sha}"', text2, count=1)
           open(dst_path, "w", encoding="utf-8").write(text2)
+
+          # 自动清理与当前 worker_name 冲突的旧路由，避免 wrangler deploy 因 route 冲突失败
+          route_pairs = extract_routes(text2)
+          zone_cache = {}
+          for pattern, zone_name in route_pairs:
+              zone_id = zone_cache.get(zone_name)
+              if not zone_id:
+                  encoded_name = urllib.parse.quote(zone_name, safe="")
+                  zres = request(
+                      "GET",
+                      f"https://api.cloudflare.com/client/v4/zones?name={encoded_name}&status=active&per_page=1",
+                  )
+                  if not zres.get("success") or not zres.get("result"):
+                      raise RuntimeError({"error": f"Zone not found: {zone_name}", "response": zres})
+                  zone_id = zres["result"][0]["id"]
+                  zone_cache[zone_name] = zone_id
+
+              page = 1
+              matched = False
+              while True:
+                  rres = request(
+                      "GET",
+                      f"https://api.cloudflare.com/client/v4/zones/{zone_id}/workers/routes?per_page=100&page={page}",
+                  )
+                  if not rres.get("success"):
+                      raise RuntimeError(rres)
+                  result = rres.get("result", [])
+                  for item in result:
+                      if item.get("pattern") != pattern:
+                          continue
+                      matched = True
+                      old_script = (item.get("script") or "").strip()
+                      route_id = (item.get("id") or "").strip()
+                      if old_script and old_script != worker_name and route_id:
+                          dres = request(
+                              "DELETE",
+                              f"https://api.cloudflare.com/client/v4/zones/{zone_id}/workers/routes/{route_id}",
+                          )
+                          if not dres.get("success"):
+                              raise RuntimeError(dres)
+                          print(f"Removed conflicting route: {pattern} ({old_script} -> {worker_name})")
+                      else:
+                          print(f"Route ready: {pattern} (current: {old_script or 'none'})")
+                  info = rres.get("result_info") or {}
+                  if page >= int(info.get("total_pages") or 1):
+                      break
+                  page += 1
+              if not matched:
+                  print(f"Route not present yet, deploy will create: {pattern}")
+
           print(f"KV ready: {kv_title} ({kv_id})")
           print(f"D1 ready: {d1_name} ({d1_id})")
           print(f"Generated {dst_path}")

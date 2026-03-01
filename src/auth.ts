@@ -78,6 +78,12 @@ export const requireApiAuth: MiddlewareHandler<{ Bindings: Env; Variables: { api
 export const requireAdminAuth: MiddlewareHandler<{ Bindings: Env }> = async (c, next) => {
   const token = extractAuthToken(c.req.header("Authorization") ?? null, c.req.header("X-API-Key") ?? null);
   if (!token) return c.json({ error: "缺少会话", code: "MISSING_SESSION" }, 401);
+
+  // 兼容旧版多页面后台：直接使用 app_key 作为管理鉴权
+  const settings = await getSettings(c.env);
+  const appKey = String(settings.global.admin_password ?? "").trim();
+  if (appKey && token === appKey) return next();
+
   const ok = await verifyAdminSession(c.env.DB, token);
   if (!ok) return c.json({ error: "会话已过期", code: "SESSION_EXPIRED" }, 401);
   return next();

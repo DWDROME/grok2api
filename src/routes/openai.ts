@@ -4,7 +4,13 @@ import type { Env } from "../env";
 import { requireApiAuth } from "../auth";
 import { getSettings, normalizeCfCookie } from "../settings";
 import { isValidModel, MODEL_CONFIG } from "../grok/models";
-import { extractContent, buildConversationPayload, sendConversationRequest } from "../grok/conversation";
+import {
+  extractContent,
+  buildConversationPayload,
+  sendConversationRequest,
+  type OpenAIToolChoice,
+  type OpenAIToolDefinition,
+} from "../grok/conversation";
 import { uploadImage } from "../grok/upload";
 import { getDynamicHeaders } from "../grok/headers";
 import { createMediaPost, createPost } from "../grok/create";
@@ -1199,6 +1205,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
       model?: string;
       messages?: any[];
       stream?: boolean;
+      tools?: OpenAIToolDefinition[];
+      tool_choice?: OpenAIToolChoice;
+      parallel_tool_calls?: boolean;
       video_config?: {
         aspect_ratio?: string;
         video_length?: number;
@@ -1247,7 +1256,15 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
-      const { content, images } = extractContent(body.messages as any);
+      const tools = Array.isArray(body.tools) ? body.tools : undefined;
+      const toolChoice = body.tool_choice;
+      const parallelToolCalls = body.parallel_tool_calls ?? true;
+      const extractOptions = {
+        ...(tools ? { tools } : {}),
+        ...(toolChoice !== undefined ? { toolChoice } : {}),
+        parallelToolCalls,
+      };
+      const { content, images } = extractContent(body.messages as any, extractOptions);
       const isVideoModel = Boolean(cfg.is_video_model);
       const imgInputs = isVideoModel && images.length > 1 ? images.slice(0, 1) : images;
 
@@ -1304,6 +1321,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
             global: settingsBundle.global,
             origin,
             requestedModel,
+            ...(tools ? { tools } : {}),
+            ...(toolChoice !== undefined ? { toolChoice } : {}),
             onFinish: async ({ status, duration }) => {
               await addRequestLog(c.env.DB, {
                 ip,
@@ -1335,6 +1354,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
           global: settingsBundle.global,
           origin,
           requestedModel,
+          ...(tools ? { tools } : {}),
+          ...(toolChoice !== undefined ? { toolChoice } : {}),
         });
 
         const duration = (Date.now() - start) / 1000;

@@ -1,6 +1,19 @@
 import type { GrokSettings, GlobalSettings } from "../settings";
+import type { OpenAIToolChoice, OpenAIToolDefinition } from "./conversation";
 
 type GrokNdjson = Record<string, unknown>;
+type ParsedToolCall = {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+  index?: number;
+};
+type ToolStreamEvent =
+  | { kind: "text"; text: string }
+  | { kind: "tool"; toolCall: ParsedToolCall };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -17,12 +30,12 @@ async function readWithTimeout(
   ]);
 }
 
-function makeChunk(
+function makeChunkWithDelta(
   id: string,
   created: number,
   model: string,
-  content: string,
-  finish_reason?: "stop" | "error" | null,
+  delta: Record<string, unknown>,
+  finish_reason?: "stop" | "tool_calls" | "error" | null,
 ): string {
   const payload: Record<string, unknown> = {
     id,
@@ -32,12 +45,37 @@ function makeChunk(
     choices: [
       {
         index: 0,
-        delta: content ? { role: "assistant", content } : {},
+        delta,
         finish_reason: finish_reason ?? null,
       },
     ],
   };
   return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+function makeChunk(
+  id: string,
+  created: number,
+  model: string,
+  content: string,
+  finish_reason?: "stop" | "tool_calls" | "error" | null,
+): string {
+  return makeChunkWithDelta(
+    id,
+    created,
+    model,
+    content ? { role: "assistant", content } : {},
+    finish_reason,
+  );
+}
+
+function makeToolChunk(
+  id: string,
+  created: number,
+  model: string,
+  toolCalls: ParsedToolCall[],
+): string {
+  return makeChunkWithDelta(id, created, model, { tool_calls: toolCalls }, null);
 }
 
 function makeDone(): string {
@@ -114,6 +152,145 @@ function normalizeGeneratedAssetUrls(input: unknown): string[] {
   return out;
 }
 
+const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+
+function stripCodeFences(text: string): string {
+  const cleaned = text.trim();
+  if (!cleaned.startsWith("```")) return cleaned;
+  return cleaned.replace(/^```[a-zA-Z0-9_-]*\s*/, "").replace(/\s*```$/, "").trim();
+}
+
+function extractJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  if (start < 0) return text;
+  const end = text.lastIndexOf("}");
+  if (end < start) return text;
+  return text.slice(start, end + 1);
+}
+
+function removeTrailingCommas(text: string): string {
+  return text.replace(/,\s*([}\]])/g, "$1");
+}
+
+function balanceBraces(text: string): string {
+  let open = 0;
+  let close = 0;
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") open += 1;
+    else if (ch === "}") close += 1;
+  }
+  if (open > close) return `${text}${"}".repeat(open - close)}`;
+  return text;
+}
+
+function repairJson(raw: string): unknown | null {
+  const cleaned = balanceBraces(
+    removeTrailingCommas(extractJsonObject(stripCodeFences(raw)).replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, " ")),
+  );
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    return null;
+  }
+}
+
+function toArgumentsString(input: unknown): string {
+  if (typeof input === "string") return input;
+  try {
+    return JSON.stringify(input ?? {});
+  } catch {
+    return String(input ?? "");
+  }
+}
+
+function validToolNames(tools?: OpenAIToolDefinition[]): Set<string> {
+  const names = new Set<string>();
+  if (!Array.isArray(tools)) return names;
+  for (const tool of tools) {
+    const name = String(tool?.function?.name ?? "").trim();
+    if (name) names.add(name);
+  }
+  return names;
+}
+
+function parseToolCallBlock(raw: string, tools?: OpenAIToolDefinition[]): ParsedToolCall | null {
+  if (!raw.trim()) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = repairJson(raw);
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed as Record<string, unknown>;
+  const name = String(obj.name ?? "").trim();
+  if (!name) return null;
+
+  const allowed = validToolNames(tools);
+  if (allowed.size > 0 && !allowed.has(name)) return null;
+
+  const args = toArgumentsString(obj.arguments ?? {});
+  return {
+    id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+    type: "function",
+    function: { name, arguments: args },
+  };
+}
+
+function parseToolCalls(
+  content: string,
+  tools?: OpenAIToolDefinition[],
+): { textContent: string | null; toolCalls: ParsedToolCall[] | null } {
+  if (!content) return { textContent: content, toolCalls: null };
+  const matches = [...content.matchAll(TOOL_CALL_RE)];
+  if (matches.length === 0) return { textContent: content, toolCalls: null };
+
+  const toolCalls: ParsedToolCall[] = [];
+  for (const match of matches) {
+    const block = String(match[1] ?? "").trim();
+    const parsed = parseToolCallBlock(block, tools);
+    if (parsed) toolCalls.push(parsed);
+  }
+  if (toolCalls.length === 0) return { textContent: content, toolCalls: null };
+
+  const textParts: string[] = [];
+  let lastEnd = 0;
+  for (const match of matches) {
+    const start = match.index ?? 0;
+    const before = content.slice(lastEnd, start).trim();
+    if (before) textParts.push(before);
+    const full = String(match[0] ?? "");
+    lastEnd = start + full.length;
+  }
+  const trailing = content.slice(lastEnd).trim();
+  if (trailing) textParts.push(trailing);
+  return { textContent: textParts.length > 0 ? textParts.join("\n") : null, toolCalls };
+}
+
+function suffixPrefix(text: string, tag: string): number {
+  if (!text || !tag) return 0;
+  const maxKeep = Math.min(text.length, tag.length - 1);
+  for (let keep = maxKeep; keep > 0; keep -= 1) {
+    if (text.endsWith(tag.slice(0, keep))) return keep;
+  }
+  return 0;
+}
+
 export function createOpenAiStreamFromGrokNdjson(
   grokResp: Response,
   opts: {
@@ -122,6 +299,8 @@ export function createOpenAiStreamFromGrokNdjson(
     global: GlobalSettings;
     origin: string;
     requestedModel: string;
+    tools?: OpenAIToolDefinition[];
+    toolChoice?: OpenAIToolChoice;
     onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
   },
 ): ReadableStream<Uint8Array> {
@@ -170,9 +349,102 @@ export function createOpenAiStreamFromGrokNdjson(
       let lastVideoProgress = -1;
 
       let buffer = "";
+      const toolStreamEnabled =
+        Array.isArray(opts.tools) && opts.tools.length > 0 && opts.toolChoice !== "none";
+      let toolState: "text" | "tool" = "text";
+      let toolBuffer = "";
+      let toolPartial = "";
+      let toolCallsSeen = false;
+      let toolCallIndex = 0;
+
+      const withToolIndex = (call: ParsedToolCall): ParsedToolCall => {
+        if (typeof call.index === "number") return call;
+        return { ...call, index: toolCallIndex++ };
+      };
+
+      const handleToolStream = (chunk: string): ToolStreamEvent[] => {
+        const events: ToolStreamEvent[] = [];
+        if (!chunk) return events;
+        const startTag = "<tool_call>";
+        const endTag = "</tool_call>";
+        let data = `${toolPartial}${chunk}`;
+        toolPartial = "";
+
+        while (data) {
+          if (toolState === "text") {
+            const startIdx = data.indexOf(startTag);
+            if (startIdx < 0) {
+              const keep = suffixPrefix(data, startTag);
+              const emit = keep > 0 ? data.slice(0, -keep) : data;
+              if (emit) events.push({ kind: "text", text: emit });
+              toolPartial = keep > 0 ? data.slice(-keep) : "";
+              break;
+            }
+            const before = data.slice(0, startIdx);
+            if (before) events.push({ kind: "text", text: before });
+            data = data.slice(startIdx + startTag.length);
+            toolState = "tool";
+            continue;
+          }
+
+          const endIdx = data.indexOf(endTag);
+          if (endIdx < 0) {
+            const keep = suffixPrefix(data, endTag);
+            const append = keep > 0 ? data.slice(0, -keep) : data;
+            if (append) toolBuffer += append;
+            toolPartial = keep > 0 ? data.slice(-keep) : "";
+            break;
+          }
+
+          toolBuffer += data.slice(0, endIdx);
+          data = data.slice(endIdx + endTag.length);
+          const parsed = parseToolCallBlock(toolBuffer, opts.tools);
+          if (parsed) {
+            events.push({ kind: "tool", toolCall: withToolIndex(parsed) });
+            toolCallsSeen = true;
+          }
+          toolBuffer = "";
+          toolState = "text";
+        }
+
+        return events;
+      };
+
+      const flushToolStream = (): ToolStreamEvent[] => {
+        const events: ToolStreamEvent[] = [];
+        if (toolState === "text") {
+          if (toolPartial) {
+            events.push({ kind: "text", text: toolPartial });
+            toolPartial = "";
+          }
+          return events;
+        }
+        const raw = `${toolBuffer}${toolPartial}`;
+        const parsed = parseToolCallBlock(raw, opts.tools);
+        if (parsed) {
+          events.push({ kind: "tool", toolCall: withToolIndex(parsed) });
+          toolCallsSeen = true;
+        } else if (raw) {
+          events.push({ kind: "text", text: `<tool_call>${raw}` });
+        }
+        toolBuffer = "";
+        toolPartial = "";
+        toolState = "text";
+        return events;
+      };
 
       const flushStop = () => {
-        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
+        const finishReason = toolStreamEnabled && toolCallsSeen ? "tool_calls" : "stop";
+        if (toolStreamEnabled) {
+          for (const event of flushToolStream()) {
+            if (event.kind === "text" && event.text) {
+              controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, event.text)));
+            } else if (event.kind === "tool") {
+              controller.enqueue(encoder.encode(makeToolChunk(id, created, currentModel, [event.toolCall])));
+            }
+          }
+        }
+        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", finishReason)));
         controller.enqueue(encoder.encode(makeDone()));
       };
 
@@ -377,12 +649,37 @@ export function createOpenAiStreamFromGrokNdjson(
               shouldSkip = true;
             }
 
-            if (!shouldSkip) controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
+            if (!shouldSkip) {
+              if (toolStreamEnabled && !currentIsThinking) {
+                for (const event of handleToolStream(content)) {
+                  if (event.kind === "text" && event.text) {
+                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, event.text)));
+                  } else if (event.kind === "tool") {
+                    controller.enqueue(encoder.encode(makeToolChunk(id, created, currentModel, [event.toolCall])));
+                  }
+                }
+              } else {
+                controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
+              }
+            }
             isThinking = currentIsThinking;
           }
         }
 
-        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
+        if (toolStreamEnabled) {
+          for (const event of flushToolStream()) {
+            if (event.kind === "text" && event.text) {
+              controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, event.text)));
+            } else if (event.kind === "tool") {
+              controller.enqueue(encoder.encode(makeToolChunk(id, created, currentModel, [event.toolCall])));
+            }
+          }
+        }
+        controller.enqueue(
+          encoder.encode(
+            makeChunk(id, created, currentModel, "", toolStreamEnabled && toolCallsSeen ? "tool_calls" : "stop"),
+          ),
+        );
         controller.enqueue(encoder.encode(makeDone()));
         if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
         controller.close();
@@ -409,7 +706,15 @@ export function createOpenAiStreamFromGrokNdjson(
 
 export async function parseOpenAiFromGrokNdjson(
   grokResp: Response,
-  opts: { cookie: string; settings: GrokSettings; global: GlobalSettings; origin: string; requestedModel: string },
+  opts: {
+    cookie: string;
+    settings: GrokSettings;
+    global: GlobalSettings;
+    origin: string;
+    requestedModel: string;
+    tools?: OpenAIToolDefinition[];
+    toolChoice?: OpenAIToolChoice;
+  },
 ): Promise<Record<string, unknown>> {
   const { global, origin, requestedModel, settings } = opts;
   const text = await grokResp.text();
@@ -476,6 +781,21 @@ export async function parseOpenAiFromGrokNdjson(
     break;
   }
 
+  let finishReason: "stop" | "tool_calls" = "stop";
+  let messageContent: string | null = content;
+  let toolCalls: ParsedToolCall[] | null = null;
+  if (Array.isArray(opts.tools) && opts.tools.length > 0 && opts.toolChoice !== "none") {
+    const parsed = parseToolCalls(content, opts.tools);
+    if (parsed.toolCalls && parsed.toolCalls.length > 0) {
+      finishReason = "tool_calls";
+      toolCalls = parsed.toolCalls.map((call, index) => ({ ...call, index }));
+      messageContent = parsed.textContent;
+    }
+  }
+
+  const message: Record<string, unknown> = { role: "assistant", content: messageContent };
+  if (toolCalls) message.tool_calls = toolCalls;
+
   return {
     id: `chatcmpl-${crypto.randomUUID()}`,
     object: "chat.completion",
@@ -484,8 +804,8 @@ export async function parseOpenAiFromGrokNdjson(
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content },
-        finish_reason: "stop",
+        message,
+        finish_reason: finishReason,
       },
     ],
     usage: null,

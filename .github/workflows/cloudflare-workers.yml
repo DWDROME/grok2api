@@ -194,16 +194,18 @@ jobs:
               zone_cache[zone_name] = zone_id
               return zone_id
 
-          # 先按子域前缀清理冲突（如遗留的 /v1/* 指向旧脚本）
+          # 先按子域前缀清理冲突/遗留路由（包括 script 为空的 bypass 规则）
           prefixes_by_zone = {}
+          desired_patterns_by_zone = {}
           for pattern, zone_name in route_pairs:
               host_prefix = route_host_prefix(pattern)
-              if not host_prefix:
-                  continue
-              prefixes_by_zone.setdefault(zone_name, set()).add(host_prefix)
+              if host_prefix:
+                  prefixes_by_zone.setdefault(zone_name, set()).add(host_prefix)
+              desired_patterns_by_zone.setdefault(zone_name, set()).add(pattern)
 
           for zone_name, prefixes in prefixes_by_zone.items():
               zone_id = get_zone_id(zone_name)
+              desired_patterns = desired_patterns_by_zone.get(zone_name, set())
               page = 1
               while True:
                   rres = request(
@@ -217,16 +219,30 @@ jobs:
                       route_pattern = (item.get("pattern") or "").strip()
                       old_script = (item.get("script") or "").strip()
                       route_id = (item.get("id") or "").strip()
-                      if not route_pattern or not old_script or old_script == worker_name or not route_id:
+                      if not route_pattern or not route_id:
                           continue
-                      if any(route_pattern.startswith(prefix) for prefix in prefixes):
-                          dres = request(
-                              "DELETE",
-                              f"https://api.cloudflare.com/client/v4/zones/{zone_id}/workers/routes/{route_id}",
-                          )
-                          if not dres.get("success"):
-                              raise RuntimeError(dres)
-                          print(f"Removed stale route by host prefix: {route_pattern} ({old_script} -> {worker_name})")
+                      if not any(route_pattern.startswith(prefix) for prefix in prefixes):
+                          continue
+                      if route_pattern in desired_patterns:
+                          if old_script and old_script != worker_name:
+                              dres = request(
+                                  "DELETE",
+                                  f"https://api.cloudflare.com/client/v4/zones/{zone_id}/workers/routes/{route_id}",
+                              )
+                              if not dres.get("success"):
+                                  raise RuntimeError(dres)
+                              print(f"Removed conflicting desired route: {route_pattern} ({old_script} -> {worker_name})")
+                          continue
+                      dres = request(
+                          "DELETE",
+                          f"https://api.cloudflare.com/client/v4/zones/{zone_id}/workers/routes/{route_id}",
+                      )
+                      if not dres.get("success"):
+                          raise RuntimeError(dres)
+                      print(
+                          f"Removed stale route by host prefix: {route_pattern} "
+                          f"(script: {old_script or 'none'} -> {worker_name})"
+                      )
                   info = rres.get("result_info") or {}
                   if page >= int(info.get("total_pages") or 1):
                       break

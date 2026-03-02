@@ -1989,7 +1989,7 @@ openAiRoutes.post("/responses", async (c) => {
     const xApiKeyHeader = c.req.header("X-API-Key");
     if (xApiKeyHeader) headers.set("X-API-Key", xApiKeyHeader);
     headers.set("Content-Type", "application/json");
-    const internalReq = new Request(`${origin}/v1/chat/completions`, {
+    const internalReq = new Request(`${origin}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify(chatPayload),

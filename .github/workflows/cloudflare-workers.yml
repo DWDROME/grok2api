@@ -98,6 +98,15 @@ jobs:
                   routes.append((m.group(1).strip(), m.group(2).strip()))
               return routes
 
+          def route_host_prefix(pattern: str) -> str:
+              raw = pattern.strip()
+              if "://" in raw:
+                  raw = raw.split("://", 1)[1]
+              slash = raw.find("/")
+              if slash < 0:
+                  return raw
+              return raw[: slash + 1]
+
           kv_id = None
           page = 1
           while True:
@@ -169,18 +178,62 @@ jobs:
           # 自动清理与当前 worker_name 冲突的旧路由，避免 wrangler deploy 因 route 冲突失败
           route_pairs = extract_routes(text2)
           zone_cache = {}
-          for pattern, zone_name in route_pairs:
+
+          def get_zone_id(zone_name: str) -> str:
               zone_id = zone_cache.get(zone_name)
-              if not zone_id:
-                  encoded_name = urllib.parse.quote(zone_name, safe="")
-                  zres = request(
+              if zone_id:
+                  return zone_id
+              encoded_name = urllib.parse.quote(zone_name, safe="")
+              zres = request(
+                  "GET",
+                  f"https://api.cloudflare.com/client/v4/zones?name={encoded_name}&status=active&per_page=1",
+              )
+              if not zres.get("success") or not zres.get("result"):
+                  raise RuntimeError({"error": f"Zone not found: {zone_name}", "response": zres})
+              zone_id = zres["result"][0]["id"]
+              zone_cache[zone_name] = zone_id
+              return zone_id
+
+          # 先按子域前缀清理冲突（如遗留的 /v1/* 指向旧脚本）
+          prefixes_by_zone = {}
+          for pattern, zone_name in route_pairs:
+              host_prefix = route_host_prefix(pattern)
+              if not host_prefix:
+                  continue
+              prefixes_by_zone.setdefault(zone_name, set()).add(host_prefix)
+
+          for zone_name, prefixes in prefixes_by_zone.items():
+              zone_id = get_zone_id(zone_name)
+              page = 1
+              while True:
+                  rres = request(
                       "GET",
-                      f"https://api.cloudflare.com/client/v4/zones?name={encoded_name}&status=active&per_page=1",
+                      f"https://api.cloudflare.com/client/v4/zones/{zone_id}/workers/routes?per_page=100&page={page}",
                   )
-                  if not zres.get("success") or not zres.get("result"):
-                      raise RuntimeError({"error": f"Zone not found: {zone_name}", "response": zres})
-                  zone_id = zres["result"][0]["id"]
-                  zone_cache[zone_name] = zone_id
+                  if not rres.get("success"):
+                      raise RuntimeError(rres)
+                  result = rres.get("result", [])
+                  for item in result:
+                      route_pattern = (item.get("pattern") or "").strip()
+                      old_script = (item.get("script") or "").strip()
+                      route_id = (item.get("id") or "").strip()
+                      if not route_pattern or not old_script or old_script == worker_name or not route_id:
+                          continue
+                      if any(route_pattern.startswith(prefix) for prefix in prefixes):
+                          dres = request(
+                              "DELETE",
+                              f"https://api.cloudflare.com/client/v4/zones/{zone_id}/workers/routes/{route_id}",
+                          )
+                          if not dres.get("success"):
+                              raise RuntimeError(dres)
+                          print(f"Removed stale route by host prefix: {route_pattern} ({old_script} -> {worker_name})")
+                  info = rres.get("result_info") or {}
+                  if page >= int(info.get("total_pages") or 1):
+                      break
+                  page += 1
+
+          for pattern, zone_name in route_pairs:
+              zone_id = get_zone_id(zone_name)
 
               page = 1
               matched = False

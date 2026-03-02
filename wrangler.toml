@@ -3,6 +3,8 @@ main = "src/index.ts"
 compatibility_date = "2026-01-28"
 
 routes = [
+  { pattern = "grok2api.ds-everything-ocean.xyz/v1/*", zone_name = "ds-everything-ocean.xyz" },
+  { pattern = "grokapi.ds-everything-ocean.xyz/v1/*", zone_name = "ds-everything-ocean.xyz" },
   { pattern = "grok2api.ds-everything-ocean.xyz/*", zone_name = "ds-everything-ocean.xyz" },
   { pattern = "grokapi.ds-everything-ocean.xyz/*", zone_name = "ds-everything-ocean.xyz" }
 ]

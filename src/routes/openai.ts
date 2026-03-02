@@ -92,7 +92,7 @@ openAiRoutes.use(
   "/*",
   cors({
     origin: "*",
-    allowHeaders: ["Authorization", "Content-Type"],
+    allowHeaders: ["Authorization", "Content-Type", "X-API-Key", "X-Grok-Debug-NDJSON"],
     allowMethods: ["GET", "POST", "OPTIONS"],
     maxAge: 86400,
   }),
@@ -1707,6 +1707,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
     const stream = Boolean(body.stream);
     const maxRetry = 3;
     let lastErr: string | null = null;
+    const debugNdjsonRequested = toBool(c.req.header("X-Grok-Debug-NDJSON"));
+    const debugNdjsonEnabled =
+      Boolean(c.get("apiAuth").is_admin) && debugNdjsonRequested && !stream;
     const reasoningEffort = normalizeReasoningEffort(body.reasoning_effort, body.reasoning);
     const include = normalizeInclude(body.include);
     const temperature = parseOptionalNumber(body.temperature);
@@ -1842,6 +1845,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           requestedModel,
           ...(tools ? { tools } : {}),
           ...(toolChoice !== undefined ? { toolChoice } : {}),
+          ...(debugNdjsonEnabled ? { debugNdjsonSample: true } : {}),
         });
         if (requireToolCall && tools?.length && !hasToolCallsInChatResponse(json)) {
           return c.json(
@@ -1967,6 +1971,9 @@ openAiRoutes.post("/responses", async (c) => {
     const topP = parseOptionalNumber(body.top_p);
     const maxOutputTokens = parseOptionalInteger(body.max_output_tokens);
     const stream = Boolean(body.stream);
+    const debugNdjsonRequested = toBool(c.req.header("X-Grok-Debug-NDJSON"));
+    const debugNdjsonEnabled =
+      Boolean(c.get("apiAuth").is_admin) && debugNdjsonRequested && !stream;
 
     const chatPayload: Record<string, unknown> = {
       model: requestedModel,
@@ -1988,6 +1995,7 @@ openAiRoutes.post("/responses", async (c) => {
     if (authHeader) headers.set("Authorization", authHeader);
     const xApiKeyHeader = c.req.header("X-API-Key");
     if (xApiKeyHeader) headers.set("X-API-Key", xApiKeyHeader);
+    if (debugNdjsonEnabled) headers.set("X-Grok-Debug-NDJSON", "1");
     headers.set("Content-Type", "application/json");
     const internalReq = new Request(`${origin}/chat/completions`, {
       method: "POST",
@@ -2068,6 +2076,9 @@ openAiRoutes.post("/responses", async (c) => {
       );
     }
     const responseJson = buildResponsesObjectFromChat({ chatJson, meta: responseMeta });
+    if (debugNdjsonEnabled && Object.prototype.hasOwnProperty.call(chatJson, "_debug_ndjson")) {
+      responseJson._debug_ndjson = (chatJson as Record<string, unknown>)._debug_ndjson;
+    }
     const duration = (Date.now() - start) / 1000;
     await addRequestLog(c.env.DB, {
       ip,

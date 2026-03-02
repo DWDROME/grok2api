@@ -30,6 +30,10 @@ type UsagePayload = {
   };
 };
 
+const NDJSON_DEBUG_SAMPLE_LIMIT = 40;
+const NDJSON_DEBUG_RAW_PREVIEW_LIMIT = 120;
+const NDJSON_DEBUG_TOKEN_PREVIEW_LIMIT = 160;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -392,6 +396,93 @@ function suffixPrefix(text: string, tag: string): number {
     if (text.endsWith(tag.slice(0, keep))) return keep;
   }
   return 0;
+}
+
+function previewText(input: string, limit: number): string {
+  const compact = input.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  if (compact.length <= limit) return compact;
+  return `${compact.slice(0, limit)}...`;
+}
+
+function buildNdjsonDebugSummary(lines: string[]): Record<string, unknown> {
+  let parsedLines = 0;
+  let parseErrors = 0;
+  let thinkingTrueLines = 0;
+  let thinkingFalseLines = 0;
+  let tokenLines = 0;
+  let webSearchLines = 0;
+  let modelResponseLines = 0;
+  const sample: Record<string, unknown>[] = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? "";
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(line) as Record<string, unknown>;
+      parsedLines += 1;
+    } catch {
+      parseErrors += 1;
+      if (sample.length < NDJSON_DEBUG_SAMPLE_LIMIT) {
+        sample.push({
+          line: i + 1,
+          parse_error: true,
+          raw_preview: previewText(line, NDJSON_DEBUG_RAW_PREVIEW_LIMIT),
+        });
+      }
+      continue;
+    }
+
+    const grok = (data.result as Record<string, unknown> | undefined)?.response as
+      | Record<string, unknown>
+      | undefined;
+    const modelResponse = grok?.modelResponse as Record<string, unknown> | undefined;
+    const rawToken = grok?.token;
+    const tokenType = Array.isArray(rawToken) ? "array" : typeof rawToken;
+    const isThinking = typeof grok?.isThinking === "boolean" ? grok.isThinking : undefined;
+    if (isThinking === true) thinkingTrueLines += 1;
+    if (isThinking === false) thinkingFalseLines += 1;
+
+    if (typeof rawToken === "string" || Array.isArray(rawToken)) tokenLines += 1;
+    if (modelResponse) modelResponseLines += 1;
+    const webSearchResults = (grok?.webSearchResults as Record<string, unknown> | undefined)?.results;
+    const webSearchCount = Array.isArray(webSearchResults) ? webSearchResults.length : 0;
+    if (webSearchCount > 0) webSearchLines += 1;
+
+    if (sample.length >= NDJSON_DEBUG_SAMPLE_LIMIT) continue;
+    sample.push({
+      line: i + 1,
+      has_response: Boolean(grok),
+      is_thinking: isThinking,
+      message_tag: typeof grok?.messageTag === "string" ? grok.messageTag : undefined,
+      has_token: tokenType === "string" ? Boolean(rawToken) : tokenType === "array",
+      token_type: tokenType,
+      token_preview: typeof rawToken === "string" ? previewText(rawToken, NDJSON_DEBUG_TOKEN_PREVIEW_LIMIT) : undefined,
+      model:
+        typeof (grok?.userResponse as Record<string, unknown> | undefined)?.model === "string"
+          ? (grok?.userResponse as Record<string, unknown>).model
+          : typeof modelResponse?.model === "string"
+            ? modelResponse.model
+            : undefined,
+      has_model_message: typeof modelResponse?.message === "string",
+      web_search_results: webSearchCount || undefined,
+      has_error:
+        Boolean((data.error as Record<string, unknown> | undefined)?.message) ||
+        (typeof modelResponse?.error === "string" && modelResponse.error.trim().length > 0),
+    });
+  }
+
+  return {
+    total_lines: lines.length,
+    parsed_lines: parsedLines,
+    parse_errors: parseErrors,
+    thinking_true_lines: thinkingTrueLines,
+    thinking_false_lines: thinkingFalseLines,
+    token_lines: tokenLines,
+    web_search_lines: webSearchLines,
+    model_response_lines: modelResponseLines,
+    sample,
+  };
 }
 
 export function createOpenAiStreamFromGrokNdjson(
@@ -850,11 +941,13 @@ export async function parseOpenAiFromGrokNdjson(
     requestedModel: string;
     tools?: OpenAIToolDefinition[];
     toolChoice?: OpenAIToolChoice;
+    debugNdjsonSample?: boolean;
   },
 ): Promise<Record<string, unknown>> {
   const { global, origin, requestedModel, settings } = opts;
   const text = await grokResp.text();
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const debugNdjson = opts.debugNdjsonSample ? buildNdjsonDebugSummary(lines) : null;
 
   let content = "";
   let model = requestedModel;
@@ -959,5 +1052,6 @@ export async function parseOpenAiFromGrokNdjson(
       },
     ],
     usage: usage ?? zeroUsage(),
+    ...(debugNdjson ? { _debug_ndjson: debugNdjson } : {}),
   };
 }

@@ -15,6 +15,21 @@ type ToolStreamEvent =
   | { kind: "text"; text: string }
   | { kind: "tool"; toolCall: ParsedToolCall };
 
+type UsagePayload = {
+  total_tokens: number;
+  input_tokens: number;
+  output_tokens: number;
+  input_tokens_details: {
+    text_tokens: number;
+    image_tokens: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+    text_tokens?: number;
+    audio_tokens?: number;
+  };
+};
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -282,6 +297,94 @@ function parseToolCalls(
   return { textContent: textParts.length > 0 ? textParts.join("\n") : null, toolCalls };
 }
 
+function isToolChoiceRequired(toolChoice?: OpenAIToolChoice): boolean {
+  if (toolChoice === "required") return true;
+  if (toolChoice && typeof toolChoice === "object") {
+    const forced = String(toolChoice.function?.name ?? "").trim();
+    return String(toolChoice.type ?? "").trim() === "function" && Boolean(forced);
+  }
+  return false;
+}
+
+function num(...values: unknown[]): number | null {
+  for (const v of values) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
+}
+
+function zeroUsage(): UsagePayload {
+  return {
+    total_tokens: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    input_tokens_details: { text_tokens: 0, image_tokens: 0 },
+  };
+}
+
+function normalizeUsage(input: unknown): UsagePayload | null {
+  if (!input || typeof input !== "object") return null;
+  const src = input as Record<string, unknown>;
+
+  const prompt = num(
+    src.input_tokens,
+    src.prompt_tokens,
+    src.inputTokens,
+    src.promptTokens,
+    src.inputTokenCount,
+  );
+  const completion = num(
+    src.output_tokens,
+    src.completion_tokens,
+    src.outputTokens,
+    src.completionTokens,
+    src.outputTokenCount,
+  );
+  const total = num(
+    src.total_tokens,
+    src.totalTokens,
+    src.totalTokenCount,
+    prompt !== null && completion !== null ? prompt + completion : null,
+  );
+  const textInput = num(
+    (src.input_tokens_details as Record<string, unknown> | undefined)?.text_tokens,
+    (src.prompt_tokens_details as Record<string, unknown> | undefined)?.text_tokens,
+  );
+  const imageInput = num(
+    (src.input_tokens_details as Record<string, unknown> | undefined)?.image_tokens,
+    (src.prompt_tokens_details as Record<string, unknown> | undefined)?.image_tokens,
+  );
+  const reasoning = num(
+    (src.completion_tokens_details as Record<string, unknown> | undefined)?.reasoning_tokens,
+    src.reasoning_tokens,
+    src.reasoningTokens,
+  );
+
+  const hasAny =
+    prompt !== null ||
+    completion !== null ||
+    total !== null ||
+    textInput !== null ||
+    imageInput !== null ||
+    reasoning !== null;
+  if (!hasAny) return null;
+
+  const usage: UsagePayload = {
+    total_tokens: total ?? 0,
+    input_tokens: prompt ?? 0,
+    output_tokens: completion ?? 0,
+    input_tokens_details: {
+      text_tokens: textInput ?? 0,
+      image_tokens: imageInput ?? 0,
+    },
+  };
+  if (reasoning !== null) {
+    usage.completion_tokens_details = { reasoning_tokens: reasoning, text_tokens: 0, audio_tokens: 0 };
+  }
+  return usage;
+}
+
 function suffixPrefix(text: string, tag: string): number {
   if (!text || !tag) return 0;
   const maxKeep = Math.min(text.length, tag.length - 1);
@@ -356,6 +459,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let toolPartial = "";
       let toolCallsSeen = false;
       let toolCallIndex = 0;
+      const requireToolCall = isToolChoiceRequired(opts.toolChoice);
 
       const withToolIndex = (call: ParsedToolCall): ParsedToolCall => {
         if (typeof call.index === "number") return call;
@@ -434,6 +538,21 @@ export function createOpenAiStreamFromGrokNdjson(
       };
 
       const flushStop = () => {
+        if (toolStreamEnabled && requireToolCall && !toolCallsSeen) {
+          controller.enqueue(
+            encoder.encode(
+              makeChunk(
+                id,
+                created,
+                currentModel,
+                "tool_choice is 'required' but model did not produce tool_calls.",
+                "error",
+              ),
+            ),
+          );
+          controller.enqueue(encoder.encode(makeDone()));
+          return;
+        }
         const finishReason = toolStreamEnabled && toolCallsSeen ? "tool_calls" : "stop";
         if (toolStreamEnabled) {
           for (const event of flushToolStream()) {
@@ -675,6 +794,23 @@ export function createOpenAiStreamFromGrokNdjson(
             }
           }
         }
+        if (toolStreamEnabled && requireToolCall && !toolCallsSeen) {
+          controller.enqueue(
+            encoder.encode(
+              makeChunk(
+                id,
+                created,
+                currentModel,
+                "tool_choice is 'required' but model did not produce tool_calls.",
+                "error",
+              ),
+            ),
+          );
+          controller.enqueue(encoder.encode(makeDone()));
+          if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+          controller.close();
+          return;
+        }
         controller.enqueue(
           encoder.encode(
             makeChunk(id, created, currentModel, "", toolStreamEnabled && toolCallsSeen ? "tool_calls" : "stop"),
@@ -722,6 +858,7 @@ export async function parseOpenAiFromGrokNdjson(
 
   let content = "";
   let model = requestedModel;
+  let usage: UsagePayload | null = null;
   for (const line of lines) {
     let data: GrokNdjson;
     try {
@@ -735,6 +872,16 @@ export async function parseOpenAiFromGrokNdjson(
 
     const grok = (data as any).result?.response;
     if (!grok) continue;
+
+    if (!usage) {
+      usage =
+        normalizeUsage((data as any).usage) ||
+        normalizeUsage((data as any).result?.usage) ||
+        normalizeUsage(grok.usage) ||
+        normalizeUsage(grok.modelResponse?.usage) ||
+        normalizeUsage(grok.tokenUsage) ||
+        null;
+    }
 
     const videoResp = grok.streamingVideoGenerationResponse;
     if (videoResp?.videoUrl && typeof videoResp.videoUrl === "string") {
@@ -792,6 +939,9 @@ export async function parseOpenAiFromGrokNdjson(
       messageContent = parsed.textContent;
     }
   }
+  if (isToolChoiceRequired(opts.toolChoice) && Array.isArray(opts.tools) && opts.tools.length > 0 && !toolCalls) {
+    throw new Error("tool_choice is 'required' but model did not produce tool_calls.");
+  }
 
   const message: Record<string, unknown> = { role: "assistant", content: messageContent };
   if (toolCalls) message.tool_calls = toolCalls;
@@ -808,6 +958,6 @@ export async function parseOpenAiFromGrokNdjson(
         finish_reason: finishReason,
       },
     ],
-    usage: null,
+    usage: usage ?? zeroUsage(),
   };
 }

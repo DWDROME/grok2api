@@ -230,6 +230,9 @@ curl http://localhost:8000/v1/responses \
 
 - 内置工具 `web_search` / `file_search` / `code_interpreter` 目前会映射为 function tool **触发调用**，但**不执行托管工具**，需客户端自行执行并回填。
 - 流式输出会包含 `response.output_text.*` 与 `response.function_call_arguments.*` 事件。
+- Cloudflare Worker 版本的 `/v1/responses` 当前为**兼容子集实现**（内部复用 `/v1/chat/completions`），已支持常用文本/工具调用场景。
+- `reasoning.effort` / `reasoning_effort` 会透传到上游模型配置；`include` 字段会保留并透传元数据提示。
+- `reasoning.encrypted_content` 属于上游能力与返回条件约束，当前为 best-effort 透传，不能保证每次都返回。
 
 <br>
 

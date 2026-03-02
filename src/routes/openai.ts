@@ -1149,6 +1149,475 @@ function resolveImageResponseFormatByMethodOrError(
   return parseResponseFormatOrError(raw, effectiveDefault);
 }
 
+const ALLOWED_REASONING_EFFORT = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+const RESPONSE_TOOL_OUTPUT_TYPES = new Set([
+  "tool_output",
+  "function_call_output",
+  "tool_call_output",
+  "input_tool_output",
+]);
+
+function parseOptionalNumber(raw: unknown): number | undefined {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  return n;
+}
+
+function parseOptionalInteger(raw: unknown): number | undefined {
+  const n = parseOptionalNumber(raw);
+  if (n === undefined) return undefined;
+  return Math.max(1, Math.floor(n));
+}
+
+function normalizeReasoningEffort(reasoningEffortRaw: unknown, reasoningRaw: unknown): string | undefined {
+  const direct = String(reasoningEffortRaw ?? "").trim().toLowerCase();
+  if (direct && ALLOWED_REASONING_EFFORT.has(direct)) return direct;
+
+  if (reasoningRaw && typeof reasoningRaw === "object") {
+    const obj = reasoningRaw as Record<string, unknown>;
+    const nested = String(obj.effort ?? obj.reasoning_effort ?? "").trim().toLowerCase();
+    if (nested && ALLOWED_REASONING_EFFORT.has(nested)) return nested;
+  }
+
+  return undefined;
+}
+
+function normalizeInclude(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const include = raw
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean);
+  return include.length > 0 ? include : undefined;
+}
+
+function isToolChoiceRequired(toolChoice: OpenAIToolChoice | undefined): boolean {
+  if (toolChoice === "required") return true;
+  if (toolChoice && typeof toolChoice === "object") {
+    const forcedName = String(toolChoice.function?.name ?? "").trim();
+    return String(toolChoice.type ?? "").trim() === "function" && Boolean(forcedName);
+  }
+  return false;
+}
+
+function hasToolCallsInChatResponse(json: Record<string, unknown>): boolean {
+  const choices = Array.isArray(json.choices) ? json.choices : [];
+  const first = choices[0] as Record<string, unknown> | undefined;
+  const message = first?.message as Record<string, unknown> | undefined;
+  return Array.isArray(message?.tool_calls) && message.tool_calls.length > 0;
+}
+
+function defaultUsage(): Record<string, unknown> {
+  return {
+    total_tokens: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    input_tokens_details: { text_tokens: 0, image_tokens: 0 },
+  };
+}
+
+function ensureUsage(usage: unknown): Record<string, unknown> {
+  if (usage && typeof usage === "object") return usage as Record<string, unknown>;
+  return defaultUsage();
+}
+
+function makeResponseId(): string {
+  return `resp_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+function makeResponseMessageId(): string {
+  return `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+function makeResponseFunctionCallId(): string {
+  return `fc_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+}
+
+function coerceResponseContentItem(item: unknown): Record<string, unknown> | null {
+  if (!item || typeof item !== "object") return null;
+  const block = item as Record<string, unknown>;
+  const blockType = String(block.type ?? "").trim();
+
+  if (blockType === "input_text" || blockType === "text" || blockType === "output_text") {
+    const text = String(block.text ?? block.content ?? "").trim();
+    if (!text) return null;
+    return { type: "text", text };
+  }
+
+  if (blockType === "input_image" || blockType === "image" || blockType === "image_url" || blockType === "output_image") {
+    const imageUrl = block.image_url;
+    let url = "";
+    if (typeof imageUrl === "string") url = imageUrl;
+    else if (imageUrl && typeof imageUrl === "object") {
+      url = String((imageUrl as Record<string, unknown>).url ?? "");
+    } else {
+      url = String(block.url ?? block.image ?? "");
+    }
+    url = url.trim();
+    if (!url) return null;
+    return { type: "image_url", image_url: { url } };
+  }
+
+  if (blockType === "input_file" || blockType === "file") {
+    const fileObj = block.file && typeof block.file === "object" ? (block.file as Record<string, unknown>) : {};
+    const fileData = String(block.file_data ?? fileObj.file_data ?? "").trim();
+    const fileId = String(block.file_id ?? fileObj.file_id ?? "").trim();
+    if (!fileData && !fileId) return null;
+    const payload: Record<string, unknown> = {};
+    if (fileData) payload.file_data = fileData;
+    if (fileId) payload.file_id = fileId;
+    return { type: "file", file: payload };
+  }
+
+  if (blockType === "input_audio" || blockType === "audio") {
+    const audioObj = block.audio && typeof block.audio === "object" ? (block.audio as Record<string, unknown>) : {};
+    const data = String(audioObj.data ?? block.data ?? "").trim();
+    if (!data) return null;
+    return { type: "input_audio", input_audio: { data } };
+  }
+
+  return null;
+}
+
+function coerceResponseContent(content: unknown): unknown {
+  if (content === null || content === undefined) return "";
+  if (typeof content === "string") return content;
+  const arr = Array.isArray(content) ? content : [content];
+  const blocks = arr
+    .map((item) => coerceResponseContentItem(item))
+    .filter((v): v is Record<string, unknown> => Boolean(v));
+  if (blocks.length > 0) return blocks;
+  return String(content);
+}
+
+function coerceResponseInputToMessages(input: unknown): Array<Record<string, unknown>> {
+  if (input === null || input === undefined) return [];
+  if (typeof input === "string") return [{ role: "user", content: input }];
+
+  if (!Array.isArray(input)) {
+    if (typeof input === "object") {
+      const obj = input as Record<string, unknown>;
+      if (obj.type === "message" || ("role" in obj && "content" in obj)) {
+        return [{ role: String(obj.role ?? "user"), content: coerceResponseContent(obj.content) }];
+      }
+      const block = coerceResponseContentItem(obj);
+      if (block) return [{ role: "user", content: [block] }];
+    }
+    return [{ role: "user", content: String(input) }];
+  }
+
+  const out: Array<Record<string, unknown>> = [];
+  let pendingBlocks: Record<string, unknown>[] = [];
+  const flushPending = () => {
+    if (!pendingBlocks.length) return;
+    out.push({ role: "user", content: pendingBlocks });
+    pendingBlocks = [];
+  };
+
+  for (const item of input) {
+    if (typeof item === "string") {
+      pendingBlocks.push({ type: "text", text: item });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const obj = item as Record<string, unknown>;
+    const itemType = String(obj.type ?? "").trim();
+
+    if (itemType === "message" || ("role" in obj && "content" in obj)) {
+      flushPending();
+      out.push({ role: String(obj.role ?? "user"), content: coerceResponseContent(obj.content) });
+      continue;
+    }
+
+    if (RESPONSE_TOOL_OUTPUT_TYPES.has(itemType)) {
+      flushPending();
+      const callId = String(obj.call_id ?? obj.tool_call_id ?? obj.id ?? `call_${crypto.randomUUID()}`);
+      out.push({
+        role: "tool",
+        tool_call_id: callId,
+        content: String(obj.output ?? obj.content ?? ""),
+      });
+      continue;
+    }
+
+    const block = coerceResponseContentItem(obj);
+    if (block) pendingBlocks.push(block);
+  }
+  flushPending();
+  return out;
+}
+
+type ResponsesRequestMeta = {
+  model: string;
+  instructions?: string;
+  maxOutputTokens?: number;
+  parallelToolCalls?: boolean;
+  previousResponseId?: string;
+  reasoningEffort?: string;
+  store?: boolean;
+  temperature?: number;
+  toolChoice?: OpenAIToolChoice;
+  tools?: OpenAIToolDefinition[];
+  topP?: number;
+  truncation?: string;
+  user?: string;
+  metadata?: Record<string, unknown>;
+};
+
+function buildResponsesOutputFromChatMessage(message: Record<string, unknown>): Record<string, unknown>[] {
+  const output: Record<string, unknown>[] = [];
+  const content = message.content;
+  if (typeof content === "string" && content.trim()) {
+    output.push({
+      id: makeResponseMessageId(),
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: content, annotations: [] }],
+    });
+  }
+
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  for (const call of toolCalls) {
+    if (!call || typeof call !== "object") continue;
+    const tool = call as Record<string, unknown>;
+    const fn = (tool.function && typeof tool.function === "object"
+      ? (tool.function as Record<string, unknown>)
+      : {}) as Record<string, unknown>;
+    output.push({
+      id: makeResponseFunctionCallId(),
+      type: "function_call",
+      status: "completed",
+      call_id: String(tool.id ?? `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`),
+      name: String(fn.name ?? ""),
+      arguments: String(fn.arguments ?? "{}"),
+    });
+  }
+  return output;
+}
+
+function buildResponsesObjectFromChat(args: {
+  chatJson: Record<string, unknown>;
+  meta: ResponsesRequestMeta;
+  responseId?: string;
+}): Record<string, unknown> {
+  const responseId = args.responseId ?? makeResponseId();
+  const createdAt = Math.floor(Date.now() / 1000);
+  const choices = Array.isArray(args.chatJson.choices) ? args.chatJson.choices : [];
+  const first = (choices[0] as Record<string, unknown> | undefined) ?? {};
+  const message = ((first.message as Record<string, unknown> | undefined) ?? {
+    role: "assistant",
+    content: "",
+  }) as Record<string, unknown>;
+
+  return {
+    id: responseId,
+    object: "response",
+    created_at: createdAt,
+    completed_at: createdAt,
+    status: "completed",
+    error: null,
+    incomplete_details: null,
+    instructions: args.meta.instructions ?? null,
+    max_output_tokens: args.meta.maxOutputTokens ?? null,
+    model: String(args.chatJson.model ?? args.meta.model),
+    output: buildResponsesOutputFromChatMessage(message),
+    parallel_tool_calls: args.meta.parallelToolCalls ?? true,
+    previous_response_id: args.meta.previousResponseId ?? null,
+    reasoning: { effort: args.meta.reasoningEffort ?? null, summary: null },
+    store: args.meta.store ?? true,
+    temperature: args.meta.temperature ?? 1,
+    text: { format: { type: "text" } },
+    tool_choice: args.meta.toolChoice ?? "auto",
+    tools: args.meta.tools ?? [],
+    top_p: args.meta.topP ?? 1,
+    truncation: args.meta.truncation ?? "disabled",
+    usage: ensureUsage(args.chatJson.usage),
+    user: args.meta.user ?? null,
+    metadata: args.meta.metadata ?? {},
+  };
+}
+
+function createResponsesStreamFromChatSse(args: {
+  chatResp: Response;
+  meta: ResponsesRequestMeta;
+}): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const responseId = makeResponseId();
+  const createdAt = Math.floor(Date.now() / 1000);
+  const outputTextParts: string[] = [];
+  const toolCallsByIndex = new Map<number, { id: string; name: string; arguments: string }>();
+  let usage: Record<string, unknown> = defaultUsage();
+  let model = args.meta.model;
+
+  const emit = (controller: ReadableStreamDefaultController<Uint8Array>, event: string, payload: Record<string, unknown>) => {
+    controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`));
+  };
+
+  const buildInProgressResponse = () => ({
+    id: responseId,
+    object: "response",
+    created_at: createdAt,
+    completed_at: null,
+    status: "in_progress",
+    error: null,
+    incomplete_details: null,
+    instructions: args.meta.instructions ?? null,
+    max_output_tokens: args.meta.maxOutputTokens ?? null,
+    model,
+    output: [],
+    parallel_tool_calls: args.meta.parallelToolCalls ?? true,
+    previous_response_id: args.meta.previousResponseId ?? null,
+    reasoning: { effort: args.meta.reasoningEffort ?? null, summary: null },
+    store: args.meta.store ?? true,
+    temperature: args.meta.temperature ?? 1,
+    text: { format: { type: "text" } },
+    tool_choice: args.meta.toolChoice ?? "auto",
+    tools: args.meta.tools ?? [],
+    top_p: args.meta.topP ?? 1,
+    truncation: args.meta.truncation ?? "disabled",
+    usage: null,
+    user: args.meta.user ?? null,
+    metadata: args.meta.metadata ?? {},
+  });
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      emit(controller, "response.created", {
+        type: "response.created",
+        response: buildInProgressResponse(),
+      });
+      emit(controller, "response.in_progress", {
+        type: "response.in_progress",
+        response: buildInProgressResponse(),
+      });
+
+      if (!args.chatResp.body) {
+        emit(controller, "response.completed", {
+          type: "response.completed",
+          response: {
+            ...buildInProgressResponse(),
+            status: "completed",
+            completed_at: Math.floor(Date.now() / 1000),
+            output: [],
+            usage,
+          },
+        });
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+        return;
+      }
+
+      const reader = args.chatResp.body.getReader();
+      let buffer = "";
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (!value) continue;
+          buffer += decoder.decode(value, { stream: true });
+          let idx = buffer.indexOf("\n");
+          while (idx >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            idx = buffer.indexOf("\n");
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+            if (payload === "[DONE]") {
+              idx = buffer.indexOf("\n");
+              continue;
+            }
+            let chunk: Record<string, unknown>;
+            try {
+              chunk = JSON.parse(payload) as Record<string, unknown>;
+            } catch {
+              continue;
+            }
+            if (typeof chunk.model === "string" && chunk.model.trim()) {
+              model = chunk.model;
+            }
+            usage = ensureUsage(chunk.usage);
+            const choices = Array.isArray(chunk.choices) ? chunk.choices : [];
+            const first = choices[0] as Record<string, unknown> | undefined;
+            const delta = (first?.delta as Record<string, unknown> | undefined) ?? {};
+            const content = delta.content;
+            if (typeof content === "string" && content) {
+              outputTextParts.push(content);
+              emit(controller, "response.output_text.delta", {
+                type: "response.output_text.delta",
+                response_id: responseId,
+                delta: content,
+              });
+            }
+            const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
+            for (const call of toolCalls) {
+              if (!call || typeof call !== "object") continue;
+              const tc = call as Record<string, unknown>;
+              const index = Number(tc.index ?? 0);
+              const fn = (tc.function && typeof tc.function === "object"
+                ? (tc.function as Record<string, unknown>)
+                : {}) as Record<string, unknown>;
+              const current = toolCallsByIndex.get(index) ?? {
+                id: String(tc.id ?? `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`),
+                name: String(fn.name ?? ""),
+                arguments: "",
+              };
+              if (typeof fn.name === "string" && fn.name.trim()) current.name = fn.name.trim();
+              const deltaArgs = typeof fn.arguments === "string" ? fn.arguments : "";
+              if (deltaArgs) {
+                current.arguments += deltaArgs;
+                emit(controller, "response.function_call_arguments.delta", {
+                  type: "response.function_call_arguments.delta",
+                  response_id: responseId,
+                  item_id: current.id,
+                  output_index: index,
+                  delta: deltaArgs,
+                });
+              }
+              toolCallsByIndex.set(index, current);
+            }
+          }
+        }
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          // ignore
+        }
+      }
+
+      const chatLikeMessage: Record<string, unknown> = {
+        role: "assistant",
+        content: outputTextParts.join(""),
+      };
+      if (toolCallsByIndex.size > 0) {
+        chatLikeMessage.tool_calls = Array.from(toolCallsByIndex.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([, tc], idx) => ({
+            id: tc.id,
+            index: idx,
+            type: "function",
+            function: { name: tc.name, arguments: tc.arguments },
+          }));
+      }
+
+      const response = buildResponsesObjectFromChat({
+        chatJson: { model, choices: [{ message: chatLikeMessage }], usage },
+        meta: args.meta,
+        responseId,
+      });
+      emit(controller, "response.completed", {
+        type: "response.completed",
+        response,
+      });
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+}
+
 openAiRoutes.get("/models", async (c) => {
   const ts = Math.floor(Date.now() / 1000);
   const data = Object.entries(MODEL_CONFIG).map(([id, cfg]) => ({
@@ -1205,6 +1674,12 @@ openAiRoutes.post("/chat/completions", async (c) => {
       model?: string;
       messages?: any[];
       stream?: boolean;
+      reasoning_effort?: unknown;
+      reasoning?: { effort?: unknown; reasoning_effort?: unknown };
+      include?: unknown;
+      temperature?: unknown;
+      top_p?: unknown;
+      max_output_tokens?: unknown;
       tools?: OpenAIToolDefinition[];
       tool_choice?: OpenAIToolChoice;
       parallel_tool_calls?: boolean;
@@ -1232,6 +1707,11 @@ openAiRoutes.post("/chat/completions", async (c) => {
     const stream = Boolean(body.stream);
     const maxRetry = 3;
     let lastErr: string | null = null;
+    const reasoningEffort = normalizeReasoningEffort(body.reasoning_effort, body.reasoning);
+    const include = normalizeInclude(body.include);
+    const temperature = parseOptionalNumber(body.temperature);
+    const topP = parseOptionalNumber(body.top_p);
+    const maxOutputTokens = parseOptionalInteger(body.max_output_tokens);
 
     // === Quota check (best-effort) ===
     // - heavy: consumes both heavy + chat
@@ -1258,6 +1738,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
 
       const tools = Array.isArray(body.tools) ? body.tools : undefined;
       const toolChoice = body.tool_choice;
+      const requireToolCall = isToolChoiceRequired(toolChoice);
       const parallelToolCalls = body.parallel_tool_calls ?? true;
       const extractOptions = {
         ...(tools ? { tools } : {}),
@@ -1293,6 +1774,11 @@ openAiRoutes.post("/chat/completions", async (c) => {
           content,
           imgIds,
           imgUris,
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+          ...(include ? { include } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
+          ...(topP !== undefined ? { topP } : {}),
+          ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
           ...(postId ? { postId } : {}),
           ...(isVideoModel && body.video_config ? { videoConfig: body.video_config } : {}),
           settings: settingsBundle.grok,
@@ -1357,6 +1843,12 @@ openAiRoutes.post("/chat/completions", async (c) => {
           ...(tools ? { tools } : {}),
           ...(toolChoice !== undefined ? { toolChoice } : {}),
         });
+        if (requireToolCall && tools?.length && !hasToolCallsInChatResponse(json)) {
+          return c.json(
+            openAiError("tool_choice is 'required' but model did not produce tool_calls.", "required_tool_call_missing"),
+            422,
+          );
+        }
 
         const duration = (Date.now() - start) / 1000;
         await addRequestLog(c.env.DB, {
@@ -1372,6 +1864,19 @@ openAiRoutes.post("/chat/completions", async (c) => {
         return c.json(json);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("tool_choice is 'required'")) {
+          const duration = (Date.now() - start) / 1000;
+          await addRequestLog(c.env.DB, {
+            ip,
+            model: requestedModel,
+            duration: Number(duration.toFixed(2)),
+            status: 422,
+            key_name: keyName,
+            token_suffix: jwt.slice(-6),
+            error: "required_tool_call_missing",
+          });
+          return c.json(openAiError(msg, "required_tool_call_missing"), 422);
+        }
         lastErr = msg;
         await recordTokenFailure(c.env.DB, jwt, 500, msg);
         await applyCooldown(c.env.DB, jwt, 500);
@@ -1391,6 +1896,189 @@ openAiRoutes.post("/chat/completions", async (c) => {
     });
 
     return c.json(openAiError(lastErr ?? "Upstream error", "upstream_error"), 500);
+  } catch (e) {
+    const duration = (Date.now() - start) / 1000;
+    await addRequestLog(c.env.DB, {
+      ip,
+      model: requestedModel || "unknown",
+      duration: Number(duration.toFixed(2)),
+      status: 500,
+      key_name: keyName,
+      token_suffix: "",
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return c.json(openAiError("Internal error", "internal_error"), 500);
+  }
+});
+
+openAiRoutes.post("/responses", async (c) => {
+  const start = Date.now();
+  const ip = getClientIp(c.req.raw);
+  const keyName = c.get("apiAuth").name ?? "Unknown";
+  let requestedModel = "";
+  try {
+    const body = (await c.req.json()) as {
+      model?: unknown;
+      input?: unknown;
+      instructions?: unknown;
+      stream?: unknown;
+      tools?: unknown;
+      tool_choice?: unknown;
+      parallel_tool_calls?: unknown;
+      reasoning?: unknown;
+      include?: unknown;
+      temperature?: unknown;
+      top_p?: unknown;
+      max_output_tokens?: unknown;
+      metadata?: unknown;
+      user?: unknown;
+      store?: unknown;
+      previous_response_id?: unknown;
+      truncation?: unknown;
+    };
+
+    requestedModel = String(body.model ?? "").trim();
+    if (!requestedModel) return c.json(openAiError("Missing 'model'", "missing_model"), 400);
+    if (!isValidModel(requestedModel)) {
+      return c.json(openAiError(`Model '${requestedModel}' not supported`, "model_not_supported"), 400);
+    }
+    if (body.input === undefined || body.input === null) {
+      return c.json(openAiError("Missing 'input'", "missing_input"), 400);
+    }
+
+    const messages = coerceResponseInputToMessages(body.input);
+    const instructions = String(body.instructions ?? "").trim();
+    if (instructions) {
+      messages.unshift({ role: "system", content: instructions });
+    }
+    if (!messages.length) {
+      return c.json(openAiError("Unable to build messages from 'input'", "invalid_input"), 400);
+    }
+
+    const tools = Array.isArray(body.tools) ? (body.tools as OpenAIToolDefinition[]) : undefined;
+    const toolChoice =
+      body.tool_choice === undefined ? undefined : (body.tool_choice as OpenAIToolChoice);
+    const requireToolCall = isToolChoiceRequired(toolChoice);
+    const parallelToolCalls =
+      typeof body.parallel_tool_calls === "boolean" ? body.parallel_tool_calls : true;
+    const reasoningEffort = normalizeReasoningEffort(undefined, body.reasoning);
+    const include = normalizeInclude(body.include);
+    const temperature = parseOptionalNumber(body.temperature);
+    const topP = parseOptionalNumber(body.top_p);
+    const maxOutputTokens = parseOptionalInteger(body.max_output_tokens);
+    const stream = Boolean(body.stream);
+
+    const chatPayload: Record<string, unknown> = {
+      model: requestedModel,
+      messages,
+      stream,
+      ...(tools ? { tools } : {}),
+      ...(toolChoice !== undefined ? { tool_choice: toolChoice } : {}),
+      parallel_tool_calls: parallelToolCalls,
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      ...(include ? { include } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(topP !== undefined ? { top_p: topP } : {}),
+      ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
+    };
+
+    const origin = new URL(c.req.url).origin;
+    const headers = new Headers();
+    const authHeader = c.req.header("Authorization");
+    if (authHeader) headers.set("Authorization", authHeader);
+    const xApiKeyHeader = c.req.header("X-API-Key");
+    if (xApiKeyHeader) headers.set("X-API-Key", xApiKeyHeader);
+    headers.set("Content-Type", "application/json");
+    const internalReq = new Request(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(chatPayload),
+    });
+    const chatResp = await openAiRoutes.fetch(internalReq, c.env, c.executionCtx);
+
+    const responseMeta: ResponsesRequestMeta = {
+      model: requestedModel,
+      ...(instructions ? { instructions } : {}),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      parallelToolCalls,
+      ...(typeof body.previous_response_id === "string" && body.previous_response_id
+        ? { previousResponseId: body.previous_response_id }
+        : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(typeof body.store === "boolean" ? { store: body.store } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(toolChoice !== undefined ? { toolChoice } : {}),
+      ...(tools ? { tools } : {}),
+      ...(topP !== undefined ? { topP } : {}),
+      ...(typeof body.truncation === "string" && body.truncation ? { truncation: body.truncation } : {}),
+      ...(typeof body.user === "string" && body.user ? { user: body.user } : {}),
+      ...(body.metadata && typeof body.metadata === "object" ? { metadata: body.metadata as Record<string, unknown> } : {}),
+    };
+
+    if (!chatResp.ok) {
+      const errorText = await chatResp.text().catch(() => "");
+      const duration = (Date.now() - start) / 1000;
+      await addRequestLog(c.env.DB, {
+        ip,
+        model: requestedModel,
+        duration: Number(duration.toFixed(2)),
+        status: chatResp.status,
+        key_name: keyName,
+        token_suffix: "",
+        error: errorText.slice(0, 200) || "responses_upstream_error",
+      });
+      return new Response(errorText, {
+        status: chatResp.status,
+        headers: {
+          "Content-Type": chatResp.headers.get("Content-Type") || "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    if (stream) {
+      const sse = createResponsesStreamFromChatSse({ chatResp, meta: responseMeta });
+      const duration = (Date.now() - start) / 1000;
+      await addRequestLog(c.env.DB, {
+        ip,
+        model: requestedModel,
+        duration: Number(duration.toFixed(2)),
+        status: 200,
+        key_name: keyName,
+        token_suffix: "",
+        error: "",
+      });
+      return new Response(sse, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    const chatJson = (await chatResp.json()) as Record<string, unknown>;
+    if (requireToolCall && tools?.length && !hasToolCallsInChatResponse(chatJson)) {
+      return c.json(
+        openAiError("tool_choice is 'required' but model did not produce tool_calls.", "required_tool_call_missing"),
+        422,
+      );
+    }
+    const responseJson = buildResponsesObjectFromChat({ chatJson, meta: responseMeta });
+    const duration = (Date.now() - start) / 1000;
+    await addRequestLog(c.env.DB, {
+      ip,
+      model: requestedModel,
+      duration: Number(duration.toFixed(2)),
+      status: 200,
+      key_name: keyName,
+      token_suffix: "",
+      error: "",
+    });
+    return c.json(responseJson);
   } catch (e) {
     const duration = (Date.now() - start) / 1000;
     await addRequestLog(c.env.DB, {

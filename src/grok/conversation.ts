@@ -49,6 +49,15 @@ export interface OpenAIChatRequestBody {
   model: string;
   messages: OpenAIChatMessage[];
   stream?: boolean;
+  reasoning_effort?: string;
+  reasoning?: {
+    effort?: string;
+    reasoning_effort?: string;
+  };
+  include?: string[];
+  temperature?: number;
+  top_p?: number;
+  max_output_tokens?: number;
   tools?: OpenAIToolDefinition[];
   tool_choice?: OpenAIToolChoice;
   parallel_tool_calls?: boolean;
@@ -250,6 +259,11 @@ export function buildConversationPayload(args: {
   content: string;
   imgIds: string[];
   imgUris: string[];
+  reasoningEffort?: string;
+  include?: string[];
+  temperature?: number;
+  topP?: number;
+  maxOutputTokens?: number;
   postId?: string;
   videoConfig?: {
     aspect_ratio?: string;
@@ -305,6 +319,33 @@ export function buildConversationPayload(args: {
     };
   }
 
+  const modelConfigOverride: Record<string, unknown> = {};
+  if (typeof args.temperature === "number" && Number.isFinite(args.temperature)) {
+    modelConfigOverride.temperature = args.temperature;
+  }
+  if (typeof args.topP === "number" && Number.isFinite(args.topP)) {
+    modelConfigOverride.topP = args.topP;
+  }
+  if (typeof args.maxOutputTokens === "number" && Number.isFinite(args.maxOutputTokens)) {
+    modelConfigOverride.maxOutputTokens = args.maxOutputTokens;
+  }
+  const reasoningEffort = String(args.reasoningEffort ?? "").trim();
+  if (reasoningEffort) {
+    modelConfigOverride.reasoningEffort = reasoningEffort;
+  }
+
+  const responseMetadata: Record<string, unknown> = {
+    requestModelDetails: { modelId: grokModel },
+  };
+  if (Object.keys(modelConfigOverride).length > 0) {
+    responseMetadata.modelConfigOverride = modelConfigOverride;
+  }
+  const include = Array.isArray(args.include) ? args.include.filter((v) => typeof v === "string" && v.trim()) : [];
+  if (include.length > 0) {
+    // Keep include hints for future metadata extraction (e.g. reasoning.encrypted_content).
+    responseMetadata.include = include;
+  }
+
   return {
     isVideoModel,
     payload: {
@@ -323,10 +364,10 @@ export function buildConversationPayload(args: {
       toolOverrides: {},
       enableSideBySide: true,
       sendFinalMetadata: true,
-      isReasoning: false,
+      isReasoning: Boolean(reasoningEffort) || /thinking|reasoning/i.test(requestModel),
       webpageUrls: [],
       disableTextFollowUps: true,
-      responseMetadata: { requestModelDetails: { modelId: grokModel } },
+      responseMetadata,
       disableMemory: false,
       forceSideBySide: false,
       modelMode: mode,

@@ -171,6 +171,62 @@ function normalizeGeneratedAssetUrls(input: unknown): string[] {
   return out;
 }
 
+type WebSearchSource = {
+  title: string;
+  url: string;
+  preview?: string;
+};
+
+function extractXaiTagValue(input: string, tag: string): string {
+  if (!input || !tag) return "";
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`<xai:${escapedTag}>([\\s\\S]*?)<\\/xai:${escapedTag}>`, "i");
+  const m = input.match(re);
+  return m && typeof m[1] === "string" ? m[1].trim() : "";
+}
+
+function normalizeToolUsageCardToken(rawToken: string): string {
+  const token = String(rawToken || "").trim();
+  if (!token) return "";
+  const toolName = extractXaiTagValue(token, "tool_name") || "tool";
+  const toolQuery = extractXaiTagValue(token, "tool_query");
+  if (toolName === "web_search" && toolQuery) return `正在检索：${toolQuery}`;
+  if (toolQuery) return `正在调用 ${toolName}：${toolQuery}`;
+  return `正在调用 ${toolName}`;
+}
+
+function normalizeWebSearchSources(input: unknown): WebSearchSource[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const out: WebSearchSource[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const url = String(rec.url ?? "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const title = String(rec.title ?? url).trim() || url;
+    const preview = String(rec.preview ?? "").replace(/\s+/g, " ").trim();
+    out.push({ title, url, ...(preview ? { preview } : {}) });
+  }
+  return out;
+}
+
+function formatWebSearchSources(sources: WebSearchSource[]): string {
+  if (!sources.length) return "";
+  const lines: string[] = ["检索来源："];
+  for (const src of sources.slice(0, 12)) {
+    const title = src.title.replace(/\]/g, "\\]");
+    const tip = (src.preview ?? "").replace(/"/g, "'");
+    if (tip) {
+      lines.push(`- [${title}](${src.url} "${tip}")`);
+    } else {
+      lines.push(`- [${title}](${src.url})`);
+    }
+  }
+  return lines.join("\n");
+}
+
 const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
 
 function stripCodeFences(text: string): string {
@@ -539,6 +595,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let isImage = false;
       let isThinking = false;
       let thinkingFinished = false;
+      const seenWebSearchSourceKeys = new Set<string>();
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
 
@@ -629,6 +686,10 @@ export function createOpenAiStreamFromGrokNdjson(
       };
 
       const flushStop = () => {
+        if (showThinking && isThinking) {
+          controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "\n</think>\n")));
+          isThinking = false;
+        }
         if (toolStreamEnabled && requireToolCall && !toolCallsSeen) {
           controller.enqueue(
             encoder.encode(
@@ -815,35 +876,40 @@ export function createOpenAiStreamFromGrokNdjson(
             }
 
             // Text chat stream
-            if (Array.isArray(rawToken)) continue;
-            if (typeof rawToken !== "string" || !rawToken) continue;
-            let token = rawToken;
+            const messageTag = String(grok.messageTag ?? "").trim();
+            const webSearchSources = normalizeWebSearchSources(grok.webSearchResults?.results);
+            const sourceKey = webSearchSources.map((s) => s.url).join("|");
+            const isToolUsageCard = messageTag === "tool_usage_card";
 
-            if (filteredTags.some((t) => token.includes(t))) continue;
+            let token = typeof rawToken === "string" ? rawToken : "";
+            let forceThinking = false;
+            let skipFilter = false;
 
-            const currentIsThinking = Boolean(grok.isThinking);
-            const messageTag = grok.messageTag;
-
-            if (thinkingFinished && currentIsThinking) continue;
-
-            if (grok.toolUsageCardId && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
-              if (currentIsThinking) {
-                if (showThinking) {
-                  let appended = "";
-                  for (const r of grok.webSearchResults.results) {
-                    const title = typeof r.title === "string" ? r.title : "";
-                    const url = typeof r.url === "string" ? r.url : "";
-                    const preview = typeof r.preview === "string" ? r.preview.replace(/\n/g, "") : "";
-                    appended += `\n- [${title}](${url} \"${preview}\")`;
-                  }
-                  token += `${appended}\n`;
-                } else {
-                  continue;
-                }
-              } else {
-                continue;
+            if (isToolUsageCard) {
+              const normalized = normalizeToolUsageCardToken(token);
+              if (normalized) {
+                token = normalized;
+                forceThinking = true;
+                skipFilter = true;
               }
             }
+
+            if (webSearchSources.length && sourceKey && !seenWebSearchSourceKeys.has(sourceKey)) {
+              seenWebSearchSourceKeys.add(sourceKey);
+              const sourcesText = formatWebSearchSources(webSearchSources);
+              if (sourcesText) {
+                token = token ? `${token}\n${sourcesText}` : sourcesText;
+                forceThinking = true;
+                skipFilter = true;
+              }
+            }
+
+            if (!token || Array.isArray(rawToken)) continue;
+            if (!skipFilter && filteredTags.some((t) => token.includes(t))) continue;
+
+            const currentIsThinking = Boolean(grok.isThinking) || forceThinking;
+
+            if (thinkingFinished && currentIsThinking) continue;
 
             let content = token;
             if (messageTag === "header") content = `\n\n${token}\n\n`;
@@ -884,6 +950,10 @@ export function createOpenAiStreamFromGrokNdjson(
               controller.enqueue(encoder.encode(makeToolChunk(id, created, currentModel, [event.toolCall])));
             }
           }
+        }
+        if (showThinking && isThinking) {
+          controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "\n</think>\n")));
+          isThinking = false;
         }
         if (toolStreamEnabled && requireToolCall && !toolCallsSeen) {
           controller.enqueue(
@@ -948,6 +1018,21 @@ export async function parseOpenAiFromGrokNdjson(
   const text = await grokResp.text();
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const debugNdjson = opts.debugNdjsonSample ? buildNdjsonDebugSummary(lines) : null;
+  const filteredTags = (settings.filtered_tags ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+  const showThinking = settings.show_thinking !== false;
+  const thinkingParts: string[] = [];
+  const seenThinkingPart = new Set<string>();
+  const seenWebSearchSourceKeys = new Set<string>();
+
+  const appendThinkingPart = (part: string) => {
+    const cleaned = String(part || "").trim();
+    if (!cleaned || seenThinkingPart.has(cleaned)) return;
+    seenThinkingPart.add(cleaned);
+    thinkingParts.push(cleaned);
+  };
 
   let content = "";
   let model = requestedModel;
@@ -965,6 +1050,24 @@ export async function parseOpenAiFromGrokNdjson(
 
     const grok = (data as any).result?.response;
     if (!grok) continue;
+
+    const messageTag = String(grok.messageTag ?? "").trim();
+    const rawToken = typeof grok.token === "string" ? grok.token : "";
+    const webSearchSources = normalizeWebSearchSources(grok.webSearchResults?.results);
+    const sourceKey = webSearchSources.map((s) => s.url).join("|");
+
+    if (messageTag === "tool_usage_card") {
+      appendThinkingPart(normalizeToolUsageCardToken(rawToken));
+    }
+    if (webSearchSources.length && sourceKey && !seenWebSearchSourceKeys.has(sourceKey)) {
+      seenWebSearchSourceKeys.add(sourceKey);
+      appendThinkingPart(formatWebSearchSources(webSearchSources));
+    }
+    if (Boolean(grok.isThinking) && rawToken && messageTag !== "tool_usage_card") {
+      if (!filteredTags.some((t) => rawToken.includes(t))) {
+        appendThinkingPart(rawToken);
+      }
+    }
 
     if (!usage) {
       usage =
@@ -1023,6 +1126,10 @@ export async function parseOpenAiFromGrokNdjson(
 
   let finishReason: "stop" | "tool_calls" = "stop";
   let messageContent: string | null = content;
+  if (showThinking && thinkingParts.length > 0) {
+    const thinkingContent = `<think>\n${thinkingParts.join("\n")}\n</think>`;
+    messageContent = messageContent ? `${thinkingContent}\n${messageContent}` : thinkingContent;
+  }
   let toolCalls: ParsedToolCall[] | null = null;
   if (Array.isArray(opts.tools) && opts.tools.length > 0 && opts.toolChoice !== "none") {
     const parsed = parseToolCalls(content, opts.tools);

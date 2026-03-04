@@ -50,6 +50,7 @@ const LOCALE_MAP = {
     "stream": { title: "流式响应", desc: "是否默认启用流式输出。" },
     "thinking": { title: "思维链", desc: "是否默认启用思维链输出。" },
     "dynamic_statsig": { title: "动态指纹", desc: "是否默认启用动态生成 Statsig 指纹。" },
+    "custom_instruction": { title: "自定义指令", desc: "多行文本，会透传为 Grok 请求参数 customPersonality。" },
     "filter_tags": { title: "过滤标签", desc: "设置自动过滤 Grok 响应中的特殊标签。" }
   },
 
@@ -185,17 +186,24 @@ const CF_REFRESH_SUB_KEYS = ['flaresolverr_url', 'refresh_interval', 'timeout'];
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 
 function getText(section, key) {
+  var tTitle = t('config.fields.' + section + '.' + key + '.title');
+  var tDesc = t('config.fields.' + section + '.' + key + '.desc');
+  if (tTitle.indexOf('config.fields.') !== 0) {
+    return { title: tTitle, desc: tDesc.indexOf('config.fields.') === 0 ? '' : tDesc };
+  }
   if (LOCALE_MAP[section] && LOCALE_MAP[section][key]) {
     return LOCALE_MAP[section][key];
   }
   return {
     title: key.replace(/_/g, ' '),
-    desc: '暂无说明，请参考配置文档。'
+    desc: t('config.noDesc')
   };
 }
 
 function getSectionLabel(section) {
-  return (LOCALE_MAP[section] && LOCALE_MAP[section].label) || `${section} 设置`;
+  var label = t('config.sections.' + section);
+  if (label.indexOf('config.sections.') !== 0) return label;
+  return (LOCALE_MAP[section] && LOCALE_MAP[section].label) || t('config.sectionFallback', { section: section });
 }
 
 function sortByOrder(keys, orderMap) {
@@ -271,6 +279,15 @@ function buildTextInput(section, key, val) {
   return { input, node: input };
 }
 
+function buildTextareaInput(section, key, val, rows = 5) {
+  const input = document.createElement('textarea');
+  input.className = 'geist-input';
+  input.rows = rows;
+  input.value = val || '';
+  setInputMeta(input, section, key);
+  return { input, node: input };
+}
+
 function buildSecretInput(section, key, val) {
   const input = document.createElement('input');
   input.type = 'text';
@@ -284,7 +301,7 @@ function buildSecretInput(section, key, val) {
   const genBtn = document.createElement('button');
   genBtn.className = 'flex-none w-[32px] h-[32px] flex items-center justify-center bg-black text-white rounded-md hover:opacity-80 transition-opacity';
   genBtn.type = 'button';
-  genBtn.title = '生成';
+  genBtn.title = t('config.generate');
   genBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>`;
   genBtn.onclick = () => {
     input.value = randomKey(16);
@@ -338,7 +355,7 @@ async function loadData() {
       logout();
     }
   } catch (e) {
-    showToast('连接失败', 'error');
+    showToast(t('common.connectionFailed'), 'error');
   }
 }
 
@@ -366,10 +383,12 @@ function renderConfig(data) {
       header.innerHTML = `<div class="config-section-title">${getSectionLabel(section)}</div>`;
 
       // 添加部分说明（如果有）
-      if (SECTION_DESCRIPTIONS[section]) {
+      var sectionDescText = t('config.sectionDescs.' + section);
+      if (sectionDescText.indexOf('config.sectionDescs.') === 0) sectionDescText = SECTION_DESCRIPTIONS[section] || '';
+      if (sectionDescText) {
         const descP = document.createElement('p');
         descP.className = 'text-[var(--accents-4)] text-sm mt-1 mb-4';
-        descP.textContent = SECTION_DESCRIPTIONS[section];
+        descP.textContent = sectionDescText;
         header.appendChild(descP);
       }
 
@@ -447,7 +466,10 @@ function buildFieldCard(section, key, val) {
 
   // Input Logic
   let built;
-  if (typeof val === 'boolean') {
+  if (section === 'app' && key === 'custom_instruction') {
+    built = buildTextareaInput(section, key, val, 6);
+  }
+  else if (typeof val === 'boolean') {
     built = buildBooleanInput(section, key, val);
   }
   else if (key === 'image_format') {
@@ -508,8 +530,8 @@ function buildFieldCard(section, key, val) {
     const link = document.createElement('a');
     link.href = '/login';
     link.className = 'config-field-action flex-none w-[32px] h-[32px] flex items-center justify-center bg-black text-white rounded-md hover:opacity-80 transition-opacity';
-    link.title = '功能玩法';
-    link.setAttribute('aria-label', '功能玩法');
+    link.title = t('config.publicAccess');
+    link.setAttribute('aria-label', t('config.publicAccess'));
     link.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7"/><path d="M7 7h10v10"/></svg>`;
     link.style.display = val ? 'inline-flex' : 'none';
     fieldCard.appendChild(link);
@@ -527,7 +549,7 @@ async function saveConfig() {
   const btn = byId('save-btn');
   const originalText = btn.innerText;
   btn.disabled = true;
-  btn.innerText = '保存中...';
+  btn.innerText = t('config.saving');
 
   try {
     const newConfig = typeof structuredClone === 'function'
@@ -543,9 +565,9 @@ async function saveConfig() {
       if (input.type === 'checkbox') {
         val = input.checked;
       } else if (input.dataset.type === 'json') {
-        try { val = JSON.parse(val); } catch (e) { throw new Error(`无效的 JSON: ${getText(s, k).title}`); }
+        try { val = JSON.parse(val); } catch (e) { throw new Error(t('config.invalidJson', { field: getText(s, k).title })); }
       } else if (k === 'app_key' && val.trim() === '') {
-        throw new Error('app_key 不能为空（后台密码）');
+        throw new Error(t('config.appKeyRequired'));
       } else if (NUMERIC_FIELDS.has(k)) {
         if (val.trim() !== '' && !Number.isNaN(Number(val))) {
           val = Number(val);
@@ -559,7 +581,7 @@ async function saveConfig() {
     if (newConfig.proxy && newConfig.proxy.enabled) {
       const url = String(newConfig.proxy.flaresolverr_url || '').trim();
       if (!url) {
-        showToast('启用自动刷新时必须填写 FlareSolverr 地址', 'error');
+        showToast(t('config.flaresolverrRequired'), 'error');
         btn.disabled = false;
         btn.innerText = originalText;
         return;
@@ -576,19 +598,19 @@ async function saveConfig() {
     });
 
     if (res.ok) {
-      btn.innerText = '成功';
-      showToast('配置已保存', 'success');
+      btn.innerText = t('config.saved');
+      showToast(t('config.configSaved'), 'success');
       setTimeout(() => {
         btn.innerText = originalText;
         btn.style.backgroundColor = '';
       }, 2000);
     } else {
-      showToast('保存失败', 'error');
+      showToast(t('common.saveFailed'), 'error');
     }
   } catch (e) {
-    showToast('错误: ' + e.message, 'error');
+    showToast(t('common.error') + ': ' + e.message, 'error');
   } finally {
-    if (btn.innerText === '保存中...') {
+    if (btn.innerText === t('config.saving')) {
       btn.disabled = false;
       btn.innerText = originalText;
     } else {

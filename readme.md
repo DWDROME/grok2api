@@ -1,6 +1,6 @@
 # Grok2API
 
-**中文** | [English](docs/README.en.md)
+**中文** | [English](docs/README.en.md) | [文档](https://blog.cheny.me/blog/posts/grok2api)
 
 > [!NOTE]
 > 本项目仅供学习与研究，使用者必须在遵循 Grok 的 **使用条款** 以及 **法律法规** 的情况下使用，不得用于非法用途。
@@ -15,6 +15,7 @@
 <br>
 
 ## 快速开始
+> [文档](https://blog.cheny.me/blog/posts/grok2api)
 
 ### 本地开发
 
@@ -31,6 +32,15 @@ cd grok2api
 
 docker compose up -d
 ```
+
+> Docker Compose 端口变量：
+>
+> - `SERVER_PORT`：容器内应用监听端口
+> - `HOST_PORT`：宿主机映射端口（仅 Docker Compose 使用）
+>
+> 小贴士：端口映射规则是 `HOST_PORT:SERVER_PORT`，你访问的是 `HOST_PORT`，容器内服务实际监听的是 `SERVER_PORT`。
+>
+> 示例：`HOST_PORT=9000 SERVER_PORT=8011 docker compose up -d`，访问 `http://localhost:9000`。
 
 ### Vercel 部署
 
@@ -52,7 +62,7 @@ docker compose up -d
 
 ## 管理面板
 
-- 访问地址：`http://<host>:8000/admin`
+- 访问地址：`http://<host>:<port>/admin`（本地运行使用 `SERVER_PORT`，Docker Compose 使用 `HOST_PORT`，默认均为 `8000`）
 - 默认密码：`grok2api`（配置项 `app.app_key`，建议修改）
 
 **功能说明**：
@@ -77,6 +87,7 @@ docker compose up -d
 | `DATA_DIR` | 数据目录（配置/Token/锁） | `./data` | `/data` |
 | `SERVER_HOST` | 服务监听地址 | `0.0.0.0` | `0.0.0.0` |
 | `SERVER_PORT` | 服务端口 | `8000` | `8000` |
+| `HOST_PORT` | Docker Compose 宿主机映射端口 | `8000` | `9000` |
 | `SERVER_WORKERS` | Uvicorn worker 数量 | `1` | `2` |
 | `SERVER_STORAGE_TYPE` | 存储类型（`local`/`redis`/`mysql`/`pgsql`） | `local` | `pgsql` |
 | `SERVER_STORAGE_URL` | 存储连接串（local 时可为空） | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
@@ -116,6 +127,8 @@ docker compose up -d
 <br>
 
 ## 接口说明
+
+> 以下示例默认使用 `localhost:8000`；若 Docker Compose 设置了 `HOST_PORT`，请替换为对应端口。
 
 ### `POST /v1/chat/completions`
 
@@ -348,9 +361,12 @@ curl http://localhost:8000/v1/images/edits \
 |  | `stream` | 流式响应 | 是否默认启用流式输出。 | `true` |
 |  | `thinking` | 思维链 | 是否默认启用思维链输出。 | `true` |
 |  | `dynamic_statsig` | 动态指纹 | 是否动态生成 Statsig 指纹。 | `true` |
+|  | `custom_instruction` | 自定义指令 | 多行文本，透传为 Grok `customPersonality`。 | `""` |
 |  | `filter_tags` | 过滤标签 | 自动过滤 Grok 响应中的特殊标签。 | `["xaiartifact","xai:tool_usage_card","grok:render"]` |
 | **proxy** | `base_proxy_url` | 基础代理 URL | 代理请求到 Grok 官网的基础服务地址。 | `""` |
 |  | `asset_proxy_url` | 资源代理 URL | 代理请求到 Grok 官网的静态资源（图片/视频）地址。 | `""` |
+|  | `cf_cookies` | CF Cookies | FlareSolverr 刷新写入的完整 Cookie 字符串。 | `""` |
+|  | `skip_proxy_ssl_verify` | 跳过代理 SSL 校验 | 代理使用自签名证书时启用（仅放行代理证书，目标站点仍校验）。 | `false` |
 |  | `enabled` | CF 自动刷新 | 是否启用 CF 自动刷新。 | `false` |
 |  | `flaresolverr_url` | FlareSolverr 地址 | FlareSolverr 服务的 HTTP 地址。 | `""` |
 |  | `refresh_interval` | 刷新间隔 | 自动刷新 cf_clearance 间隔（秒）。 | `3600` |
@@ -360,6 +376,7 @@ curl http://localhost:8000/v1/images/edits \
 |  | `user_agent` | User-Agent | HTTP 请求的 User-Agent 字符串。 | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36` |
 | **retry** | `max_retry` | 最大重试 | 请求 Grok 服务失败时的最大重试次数。 | `3` |
 |  | `retry_status_codes` | 重试状态码 | 触发重试的 HTTP 状态码列表。 | `[401, 429, 403]` |
+|  | `reset_session_status_codes` | 重建状态码 | 触发重建 session 的 HTTP 状态码列表（用于轮换代理）。 | `[403]` |
 |  | `retry_backoff_base` | 退避基数 | 重试退避的基础延迟（秒）。 | `0.5` |
 |  | `retry_backoff_factor` | 退避倍率 | 重试退避的指数放大系数。 | `2.0` |
 |  | `retry_backoff_max` | 退避上限 | 单次重试等待的最大延迟（秒）。 | `20.0` |

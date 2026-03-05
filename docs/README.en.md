@@ -1,6 +1,6 @@
 # Grok2API
 
-[中文](../readme.md) | **English**
+[中文](../readme.md) | **English** | [Docs](https://blog.cheny.me/blog/posts/grok2api)
 
 > [!NOTE]
 > This project is for learning and research only. You must comply with Grok **Terms of Use** and **local laws and regulations**. Do not use for illegal purposes.
@@ -15,6 +15,7 @@ Grok2API rebuilt with **FastAPI**, fully aligned with the latest web call format
 <br>
 
 ## Quick Start
+> [Docs](https://blog.cheny.me/blog/posts/grok2api)
 
 ### Local
 
@@ -31,6 +32,15 @@ cd grok2api
 
 docker compose up -d
 ```
+
+> Docker Compose port variables:
+>
+> - `SERVER_PORT`: app listening port inside the container
+> - `HOST_PORT`: host-side published port (Docker Compose only)
+>
+> Tip: mapping follows `HOST_PORT:SERVER_PORT` - users connect to `HOST_PORT`, while the app listens on `SERVER_PORT` inside the container.
+>
+> Example: `HOST_PORT=9000 SERVER_PORT=8011 docker compose up -d`, then access `http://localhost:9000`.
 
 ### Vercel
 
@@ -52,7 +62,7 @@ docker compose up -d
 
 ## Admin Panel
 
-- Access: `http://<host>:8000/admin`
+- Access: `http://<host>:<port>/admin` (use `SERVER_PORT` for local run and `HOST_PORT` for Docker Compose; both default to `8000`)
 - Default password: `grok2api` (config `app.app_key`, recommended to change)
 
 **Features**:
@@ -77,6 +87,7 @@ docker compose up -d
 | `DATA_DIR` | Data dir (config/tokens/locks) | `./data` | `/data` |
 | `SERVER_HOST` | Bind address | `0.0.0.0` | `0.0.0.0` |
 | `SERVER_PORT` | Server port | `8000` | `8000` |
+| `HOST_PORT` | Host published port for Docker Compose | `8000` | `9000` |
 | `SERVER_WORKERS` | Uvicorn worker count | `1` | `2` |
 | `SERVER_STORAGE_TYPE` | Storage type (`local`/`redis`/`mysql`/`pgsql`) | `local` | `pgsql` |
 | `SERVER_STORAGE_URL` | Storage DSN (optional for local) | `""` | `postgresql+asyncpg://user:password@host:5432/db` |
@@ -116,6 +127,8 @@ docker compose up -d
 <br>
 
 ## API
+
+> The examples below use `localhost:8000` by default; if you set `HOST_PORT` in Docker Compose, replace the port accordingly.
 
 ### `POST /v1/chat/completions`
 
@@ -344,9 +357,12 @@ Config file: `data/config.toml`
 |  | `stream` | Stream | Enable streaming by default. | `true` |
 |  | `thinking` | Thinking | Enable reasoning output by default. | `true` |
 |  | `dynamic_statsig` | Dynamic statsig | Generate dynamic Statsig values. | `true` |
+|  | `custom_instruction` | Custom instruction | Multi-line text passed through as Grok `customPersonality`. | `""` |
 |  | `filter_tags` | Filter tags | Filter special tags in responses. | `["xaiartifact","xai:tool_usage_card","grok:render"]` |
 | **proxy** | `base_proxy_url` | Base proxy URL | Proxy to Grok web. | `""` |
 |  | `asset_proxy_url` | Asset proxy URL | Proxy to Grok assets (img/video). | `""` |
+|  | `cf_cookies` | CF cookies | Full cookie string written by FlareSolverr refresh. | `""` |
+|  | `skip_proxy_ssl_verify` | Skip proxy SSL verify | Enable when proxy uses a self-signed cert (proxy only; upstream TLS is still verified). | `false` |
 |  | `enabled` | CF auto refresh | Enable Cloudflare auto refresh. | `false` |
 |  | `flaresolverr_url` | FlareSolverr URL | FlareSolverr HTTP endpoint. | `""` |
 |  | `refresh_interval` | Refresh interval | Refresh cf_clearance interval (seconds). | `3600` |
@@ -356,6 +372,7 @@ Config file: `data/config.toml`
 |  | `user_agent` | User-Agent | HTTP User-Agent string. | `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36` |
 | **retry** | `max_retry` | Max retry | Max retries for upstream failures. | `3` |
 |  | `retry_status_codes` | Retry codes | HTTP status codes that trigger retry. | `[401, 429, 403]` |
+|  | `reset_session_status_codes` | Reset session codes | HTTP status codes that trigger session reset (proxy rotation). | `[403]` |
 |  | `retry_backoff_base` | Backoff base | Retry backoff base seconds. | `0.5` |
 |  | `retry_backoff_factor` | Backoff factor | Exponential backoff factor. | `2.0` |
 |  | `retry_backoff_max` | Backoff max | Max delay per retry (seconds). | `20.0` |
